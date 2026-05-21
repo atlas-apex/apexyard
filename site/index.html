@@ -11,6 +11,10 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="alternate" type="text/markdown" href="/index.md">
 
+<!-- LLM consumers: payload size hints (token estimate = chars / 4). #333 item C. -->
+<meta name="llm:token-count" content="20951">
+<meta name="llm:doc-length" content="83805 chars">
+
 <!-- Open Graph -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="ApexYard">
@@ -1421,6 +1425,7 @@ footer.foot {
     <div class="hero__eyebrow rise rise-1">
       <span class="pill">apexyard v1.1</span>
       <span>open source · MIT · for founders forging multiple products</span>
+      <button class="copy-for-ai" data-md-url="/index.md" type="button" style="margin-left:auto;font-size:0.75rem;padding:0.25rem 0.6rem;border:1px solid currentColor;border-radius:4px;background:transparent;color:inherit;cursor:pointer;font-family:inherit;">Copy as Markdown for AI</button>
     </div>
 
     <h1 class="hero__title rise rise-2">apexyard</h1>
@@ -2310,5 +2315,6 @@ confirm it skips the missing column before merge."</span></pre>
 })();
 </script>
 
+<script src="/copy-for-ai.js" defer></script>
 </body>
 </html>

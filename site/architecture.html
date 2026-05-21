@@ -11,6 +11,10 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="alternate" type="text/markdown" href="/architecture.md">
 
+<!-- LLM consumers: payload size hints (token estimate = chars / 4). #333 item C. -->
+<meta name="llm:token-count" content="8129">
+<meta name="llm:doc-length" content="32519 chars">
+
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="ApexYard">
 <meta property="og:url" content="https://yard.apexscript.com/architecture">
@@ -390,6 +394,7 @@ a:hover { color: var(--accent); }
       <div class="page-header__eyebrow">
         <span class="pill">apexyard / architecture</span>
         <span>one fork, five layers, optional sibling repo</span>
+        <button class="copy-for-ai" data-md-url="/architecture.md" type="button" style="margin-left:auto;font-size:0.75rem;padding:0.25rem 0.6rem;border:1px solid currentColor;border-radius:4px;background:transparent;color:inherit;cursor:pointer;font-family:inherit;">Copy as Markdown for AI</button>
       </div>
       <h1>Architecture</h1>
       <p class="tagline" id="ai-lead">
@@ -689,5 +694,6 @@ a:hover { color: var(--accent); }
   </div>
 </footer>
 
+<script src="/copy-for-ai.js" defer></script>
 </body>
 </html>
