@@ -115,6 +115,11 @@
           },
           {
             "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "bash -c 'r=$PWD;while [ ! -f \"$r/.apexyard-fork\" ] && [ ! -f \"$r/onboarding.yaml\" ] && [ -n \"$r\" ] && [ \"$r\" != / ];do r=${r%/*};done;[ -f \"$r/.apexyard-fork\" ] || [ -f \"$r/onboarding.yaml\" ] || exit 0;exec \"$r/.claude/hooks/warn-bootstrap-scope.sh\"'"
+          },
+          {
+            "type": "command",
             "if": "Bash(git push *)",
             "command": "bash -c 'r=$PWD;while [ ! -f \"$r/.apexyard-fork\" ] && [ ! -f \"$r/onboarding.yaml\" ] && [ -n \"$r\" ] && [ \"$r\" != / ];do r=${r%/*};done;[ -f \"$r/.apexyard-fork\" ] || [ -f \"$r/onboarding.yaml\" ] || exit 0;exec \"$r/.claude/hooks/block-agent-routing-drift.sh\"'"
           },

@@ -67,6 +67,21 @@ mkdir -p .claude/session && echo "handover" > .claude/session/active-bootstrap
 
 Clear the marker on completion (Step "Post-Handover Checklist" below). If the skill is interrupted, the SessionStart hook `clear-bootstrap-marker.sh` clears it at the start of the next session. See AgDR-0011 + me2resh/apexyard#150.
 
+### Bootstrap scope — what IS and IS NOT exempt
+
+The bootstrap exemption covers ONLY these writes:
+- `apexyard.projects.yaml` — registry append (step 7)
+- `projects/<name>/` — assessment, architecture stub, README (steps 5, 6)
+- `.claude/session/active-bootstrap` — the marker itself (step 0)
+- Topology instantiation files (step 5.5, if a topology is picked)
+
+It does NOT cover:
+- Palette changes, UI work, or any other user request made during the session
+- Creating or pushing new repositories
+- Commits to branches without a ticket
+
+If the user requests work outside the handover's scope mid-session, tell them: "That's outside the handover's bootstrap exemption — let me /start-ticket first." Then follow the normal SDLC: ticket → branch → PR → review.
+
 ### 1. Locate the target repo
 
 If a path is given, use it. If a URL is given, prompt the user to clone it into `workspace/<name>/` first (don't clone automatically — that's a side-effect with cost). If nothing is given, ask:
