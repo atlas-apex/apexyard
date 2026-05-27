@@ -44,3 +44,13 @@ workspace/*/
 # `git status` shows them as untracked symlinks — leave them alone.
 # If you absolutely want to suppress the untracked-symlink line, add the
 # specific name to .git/info/exclude on each clone.
+
+# Split-portfolio v2 — registry, per-project docs, and onboarding config
+# live in the private sibling repo. Ignore them here so a stray `git add`
+# never stages private project names on the public fork.
+/apexyard.projects.yaml
+/projects
+/onboarding.yaml
+
+# Split-portfolio v2 ops-fork marker (per-fork, committed).
+# Not ignored — .apexyard-fork IS committed.
