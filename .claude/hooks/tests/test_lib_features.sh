@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC1090,SC2034
 # Tests for .claude/hooks/_lib-features.sh — the feature-flag reader library.
 #
 # Cases:
@@ -14,7 +15,6 @@
 
 set -u
 
-# shellcheck disable=SC1090
 LIB_FEATURES_SRC="$(cd "$(dirname "$0")/.." && pwd)/_lib-features.sh"
 LIB_PORTFOLIO_SRC="$(cd "$(dirname "$0")/.." && pwd)/_lib-portfolio-paths.sh"
 LIB_CONFIG_SRC="$(cd "$(dirname "$0")/.." && pwd)/_lib-read-config.sh"
