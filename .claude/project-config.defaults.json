@@ -155,7 +155,8 @@
     "onboarding": "./onboarding.yaml",
     "workspace_dir": "./workspace",
     "custom_skills_dir": "./custom-skills",
-    "custom_handbooks_dir": "./custom-handbooks"
+    "custom_handbooks_dir": "./custom-handbooks",
+    "features": "./features.yaml"
   },
 
   "tracker": {

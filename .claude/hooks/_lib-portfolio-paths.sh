@@ -15,6 +15,7 @@
 #   ideas_backlog=$(portfolio_ideas_backlog)
 #   onboarding=$(portfolio_onboarding_path)         # framework ≥ #242
 #   workspace_dir=$(portfolio_workspace_dir)        # framework ≥ #242
+#   features_file=$(portfolio_features_file)         # framework ≥ #5
 #   agent_routing=$(portfolio_agent_routing)        # framework ≥ #351
 #   portfolio_validate || echo "broken: $(portfolio_validate)"
 #
@@ -288,6 +289,18 @@ portfolio_custom_handbooks_dir() {
 #
 #   Default: ./agent-routing.yaml (relative to ops-fork root)
 # ------------------------------------------------------------------------------
+_PORTFOLIO_FEATURES_FILE_CACHE=""
+portfolio_features_file() {
+  if [ -n "$_PORTFOLIO_FEATURES_FILE_CACHE" ]; then
+    echo "$_PORTFOLIO_FEATURES_FILE_CACHE"
+    return 0
+  fi
+  local raw
+  raw=$(_portfolio_get '.portfolio.features' './features.yaml')
+  _PORTFOLIO_FEATURES_FILE_CACHE=$(_portfolio_resolve "$raw")
+  echo "$_PORTFOLIO_FEATURES_FILE_CACHE"
+}
+
 _PORTFOLIO_AGENT_ROUTING_CACHE=""
 portfolio_agent_routing() {
   if [ -n "$_PORTFOLIO_AGENT_ROUTING_CACHE" ]; then
@@ -426,6 +439,7 @@ portfolio_clear_cache() {
   _PORTFOLIO_WORKSPACE_DIR_CACHE=""
   _PORTFOLIO_CUSTOM_SKILLS_DIR_CACHE=""
   _PORTFOLIO_CUSTOM_HANDBOOKS_DIR_CACHE=""
+  _PORTFOLIO_FEATURES_FILE_CACHE=""
   _PORTFOLIO_AGENT_ROUTING_CACHE=""
 }
 
