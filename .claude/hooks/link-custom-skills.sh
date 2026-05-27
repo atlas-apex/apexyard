@@ -88,6 +88,12 @@ LIB_CONFIG="$ops_root/.claude/hooks/_lib-read-config.sh"
 # shellcheck source=/dev/null
 . "$LIB_PORTFOLIO"
 
+LIB_FEATURES="$ops_root/.claude/hooks/_lib-features.sh"
+if [ -f "$LIB_FEATURES" ]; then
+  # shellcheck source=/dev/null
+  . "$LIB_FEATURES"
+fi
+
 custom_skills_dir=$(portfolio_custom_skills_dir 2>/dev/null)
 
 # Helper failure → no-op silently.
@@ -119,6 +125,16 @@ for src in "$custom_skills_dir"/*/; do
   [ -d "$src" ] || continue
   src="${src%/}"
   name=$(basename "$src")
+
+  # Feature-flag gate: convert skill name to features.yaml key (hyphens
+  # to underscores) and check. Only explicit enabled: false blocks;
+  # absent key or missing file = enabled (backward compat).
+  if command -v feature_enabled >/dev/null 2>&1; then
+    feature_key=$(echo "$name" | tr '-' '_')
+    if ! feature_enabled "$feature_key"; then
+      continue
+    fi
+  fi
 
   # Skip if the source dir doesn't contain a SKILL.md — nothing for Claude
   # Code to discover.
