@@ -81,13 +81,13 @@ feature_enabled() {
     val=$(yq eval ".$name.enabled // \"\"" "$f" 2>/dev/null)
   fi
 
-  # Fallback: python3 + yaml.
+  # Fallback: python3 + yaml. Values passed via env vars to avoid injection.
   if [ -z "$val" ] && command -v python3 >/dev/null 2>&1; then
-    val=$(python3 -c "
-import yaml, sys
+    val=$(FEATURES_FILE="$f" FEATURES_KEY="$name" python3 -c "
+import yaml, os
 try:
-    d = yaml.safe_load(open('$f'))
-    v = (d or {}).get('$name', {})
+    d = yaml.safe_load(open(os.environ['FEATURES_FILE']))
+    v = (d or {}).get(os.environ['FEATURES_KEY'], {})
     if isinstance(v, dict):
         print(v.get('enabled', ''))
     else:
@@ -136,13 +136,13 @@ feature_get() {
   fi
 
   if [ -z "$val" ] && command -v python3 >/dev/null 2>&1; then
-    val=$(python3 -c "
-import yaml, sys
+    val=$(FEATURES_FILE="$f" FEATURES_KEY="$name" FEATURES_SUBKEY="$key" python3 -c "
+import yaml, os
 try:
-    d = yaml.safe_load(open('$f'))
-    v = (d or {}).get('$name', {})
+    d = yaml.safe_load(open(os.environ['FEATURES_FILE']))
+    v = (d or {}).get(os.environ['FEATURES_KEY'], {})
     if isinstance(v, dict):
-        r = v.get('$key', '')
+        r = v.get(os.environ['FEATURES_SUBKEY'], '')
         print('' if r is None else r)
     else:
         print('')
