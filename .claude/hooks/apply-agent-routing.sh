@@ -538,6 +538,26 @@ if [ "$REACHABLE_COUNT" -ge 1 ]; then
     : > "$SESSION_ENV"
   fi
   printf 'ANTHROPIC_BASE_URL=%s\n' "$FIRST_EP" >> "$SESSION_ENV"
+
+  # -----------------------------------------------------------------------------
+  # Routing-active check — see me2resh/apexyard#442.
+  # __session__.env is written above, but Claude Code's process env was set
+  # when Claude was launched — SessionStart hooks run in child shells and
+  # can't mutate the parent. So unless the adopter sources __session__.env
+  # in their shell profile BEFORE launching Claude Code, the routing won't
+  # actually take effect even though the banner reports overrides applied.
+  # Detect the mismatch and warn explicitly so the adopter sees the gap
+  # at SessionStart rather than discovering it via "why is my proxy log
+  # empty?" later.
+  # -----------------------------------------------------------------------------
+  if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ "${ANTHROPIC_BASE_URL:-}" != "$FIRST_EP" ]; then
+    cat >&2 <<EOF
+⚠ agent-routing: ANTHROPIC_BASE_URL=$FIRST_EP was written to $SESSION_ENV but is NOT set in this Claude session's process env. Routing is INACTIVE — every agent call still hits the Anthropic API. To activate, add this line to your shell profile (~/.zshrc / ~/.bashrc) and relaunch Claude Code from a fresh terminal:
+    [ -f "$SESSION_ENV" ] && . "$SESSION_ENV" && export ANTHROPIC_BASE_URL
+See docs/local-model-setup.md § "Before you start" and me2resh/apexyard#442.
+EOF
+    warnings=$((warnings + 1))
+  fi
 fi
 
 # Clean up local-routing scratch files.

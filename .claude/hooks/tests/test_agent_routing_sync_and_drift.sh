@@ -538,7 +538,11 @@ agents:
     endpoint: http://localhost:4000
 YAML
 
-banner_output=$(cd "$SB" && PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
+# Case 9 simulates the happy path where the adopter has done the shell-profile
+# step from docs/local-model-setup.md — ANTHROPIC_BASE_URL is already set in
+# the process env so the new routing-active check (me2resh/apexyard#442)
+# does NOT fire.
+banner_output=$(cd "$SB" && ANTHROPIC_BASE_URL=http://localhost:4000 PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
 after_tm=$(read_model_line "$SB/.claude/agents/ticket-manager.md")
 session_env="$SB/.claude/session/agent-env/__session__.env"
 agent_env="$SB/.claude/session/agent-env/ticket-manager.env"
@@ -551,7 +555,7 @@ if [ "$after_tm" = "ollama/qwen2.5-coder:14b" ] \
    && [ "$session_set" = "1" ] \
    && [ "$agent_set" = "1" ] \
    && echo "$banner_output" | grep -qE 'applied 1 agent-routing override.*1 Ollama, 0 warning'; then
-  mark_pass "case 9: Ollama agent with reachable proxy + pulled model (full apply, session + per-agent env, no warnings)"
+  mark_pass "case 9: Ollama agent with reachable proxy + pulled model (full apply, session + per-agent env, no warnings; ANTHROPIC_BASE_URL preset)"
 else
   mark_fail "case 9: Ollama agent reachable + pulled" "model=$after_tm session=$session_set agent=$agent_set banner=[$banner_output]"
 fi
@@ -619,7 +623,9 @@ agents:
     endpoint: http://localhost:4000
 YAML
 
-banner_output=$(cd "$SB" && PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
+# Case 11 — ANTHROPIC_BASE_URL preset (happy-path shell), so the only warning
+# should be the model-not-pulled hint, not the routing-active check.
+banner_output=$(cd "$SB" && ANTHROPIC_BASE_URL=http://localhost:4000 PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
 session_env="$SB/.claude/session/agent-env/__session__.env"
 session_set=0
 [ -f "$session_env" ] && grep -q '^ANTHROPIC_BASE_URL=http://localhost:4000$' "$session_env" && session_set=1
@@ -628,7 +634,7 @@ if echo "$banner_output" | grep -qE 'model qwen2\.5-coder:14b not in local Ollam
    && echo "$banner_output" | grep -qE 'ollama pull qwen2\.5-coder:14b' \
    && [ "$session_set" = "1" ] \
    && echo "$banner_output" | grep -qE 'applied 1 agent-routing override.*1 Ollama, 1 warning'; then
-  mark_pass "case 11: Ollama agent with reachable proxy + missing model (override applies, pull-hint emitted)"
+  mark_pass "case 11: Ollama agent with reachable proxy + missing model (override applies, pull-hint emitted; ANTHROPIC_BASE_URL preset)"
 else
   mark_fail "case 11: Ollama model-not-pulled" "session=$session_set banner=[$banner_output]"
 fi
@@ -657,7 +663,8 @@ agents:
     endpoint: http://localhost:4000
 YAML
 
-banner_output=$(cd "$SB" && PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
+# Case 12 — ANTHROPIC_BASE_URL preset (happy-path shell).
+banner_output=$(cd "$SB" && ANTHROPIC_BASE_URL=http://localhost:4000 PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
 session_env="$SB/.claude/session/agent-env/__session__.env"
 session_lines=0
 [ -f "$session_env" ] && session_lines=$(wc -l < "$session_env" | tr -d ' ')
@@ -667,7 +674,7 @@ if [ -f "$session_env" ] \
    && [ "$session_lines" = "1" ] \
    && ! echo "$banner_output" | grep -qE 'multiple endpoints' \
    && echo "$banner_output" | grep -qE 'applied 2 agent-routing override.*2 Ollama'; then
-  mark_pass "case 12: two agents same endpoint (single __session__.env, no multi-endpoint warning)"
+  mark_pass "case 12: two agents same endpoint (single __session__.env, no multi-endpoint warning; ANTHROPIC_BASE_URL preset)"
 else
   mark_fail "case 12: same endpoint" "session_lines=$session_lines banner=[$banner_output]"
 fi
@@ -698,7 +705,12 @@ agents:
     endpoint: http://localhost:4001
 YAML
 
-banner_output=$(cd "$SB" && PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
+# Case 13 — ANTHROPIC_BASE_URL preset matching EITHER endpoint (whichever
+# wins as first-declared). Both 4000 and 4001 are reachable per the mock;
+# the iteration order picks one. We just need to keep the routing-active
+# warning silent, so set the env to match either possibility — the parser's
+# determinism is tested by checking the resulting session env content below.
+banner_output=$(cd "$SB" && ANTHROPIC_BASE_URL=http://localhost:4000 PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
 session_env="$SB/.claude/session/agent-env/__session__.env"
 session_set=0
 # Order of writes from $AGENT_ENDPOINTS depends on the iteration order of
@@ -712,6 +724,47 @@ if [ "$session_set" = "1" ] \
   mark_pass "case 13: two agents different endpoints (first wins, multi-endpoint warning emitted)"
 else
   mark_fail "case 13: different endpoints" "session_set=$session_set banner=[$banner_output]"
+fi
+unset APEXYARD_MOCK_CURL_DIR
+rm -rf "$SB"
+
+# ===========================================================================
+# CASE 14 — Ollama agent with reachable proxy + pulled model BUT the parent
+# shell didn't preset ANTHROPIC_BASE_URL. me2resh/apexyard#442: the routing
+# is INACTIVE because Claude Code's process env doesn't have the var.
+# Expect: __session__.env still written (next-session prep); banner reports
+# "1 Ollama, 1 warning(s)" naming the routing-INACTIVE gap and the exact
+# shell-profile line to add.
+# ===========================================================================
+SB=$(make_fork)
+MOCK_BIN=$(make_mock_curl "$SB")
+APEXYARD_MOCK_CURL_DIR=$(mktemp -d)
+export APEXYARD_MOCK_CURL_DIR
+printf '200\n[]\n' > "$APEXYARD_MOCK_CURL_DIR/http_localhost_4000_v1_models"
+printf '200\n{"models":[{"name":"qwen2.5-coder:14b"}]}\n' > "$APEXYARD_MOCK_CURL_DIR/http_localhost_4000_api_tags"
+
+cat > "$SB/agent-routing.yaml" <<'YAML'
+version: 1
+agents:
+  ticket-manager:
+    model: ollama/qwen2.5-coder:14b
+    endpoint: http://localhost:4000
+YAML
+
+# Deliberately NOT setting ANTHROPIC_BASE_URL — simulates the adopter who
+# enabled Example C but never did the shell-profile step.
+banner_output=$(cd "$SB" && unset ANTHROPIC_BASE_URL; PATH="$MOCK_BIN:$PATH" bash .claude/hooks/apply-agent-routing.sh 2>&1 < /dev/null || true)
+session_env="$SB/.claude/session/agent-env/__session__.env"
+session_set=0
+[ -f "$session_env" ] && grep -q '^ANTHROPIC_BASE_URL=http://localhost:4000$' "$session_env" && session_set=1
+
+if [ "$session_set" = "1" ] \
+   && echo "$banner_output" | grep -qiE 'routing is INACTIVE' \
+   && echo "$banner_output" | grep -qF "$session_env" \
+   && echo "$banner_output" | grep -qE 'applied 1 agent-routing override.*1 Ollama, 1 warning'; then
+  mark_pass "case 14 (#442): Ollama routing INACTIVE when ANTHROPIC_BASE_URL not preset (session env written, warning names the gap)"
+else
+  mark_fail "case 14 (#442): routing-inactive warning" "session=$session_set banner=[$banner_output]"
 fi
 unset APEXYARD_MOCK_CURL_DIR
 rm -rf "$SB"
