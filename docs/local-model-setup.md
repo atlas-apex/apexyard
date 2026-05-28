@@ -6,6 +6,25 @@ This is **opt-in**. The default `agent-routing.yaml` shape is empty; absence of 
 
 > **Read this first:** [Spike #195 — local-model routing measurement + recommendation](spikes/local-model-routing.md). The TL;DR is *"NO-GO as designed, partial GO for synthesis-style sub-tasks; not for everything."* This guide ships the routing mechanism #438 asks for, but the spike's conclusions about tool-call reliability, cold-start latency, and "no silent fallback" all still apply.
 
+## Before you start — the one manual step
+
+`ANTHROPIC_BASE_URL` is set in your shell **before** Claude Code launches. SessionStart hooks (which is where `apply-agent-routing.sh` runs) execute in child shells and **cannot** change Claude's process env. So even after the SessionStart banner reports `applied N agent-routing override(s)`, the routing is INACTIVE until you do this:
+
+```bash
+# Add ONE of these to ~/.zshrc, ~/.bashrc, or your equivalent shell profile.
+# The session-env file is written by apply-agent-routing.sh on each
+# SessionStart and contains the resolved ANTHROPIC_BASE_URL for the
+# first-declared reachable endpoint in agent-routing.yaml.
+
+ops_root="${APEXYARD_OPS_ROOT:-$HOME/projects/apexyard}"   # or your fork's path
+session_env="${ops_root}/.claude/session/agent-env/__session__.env"
+[ -f "$session_env" ] && . "$session_env" && export ANTHROPIC_BASE_URL
+```
+
+Open a fresh terminal and launch Claude Code from it. On every SessionStart, the apply hook checks whether `$ANTHROPIC_BASE_URL` in the current process matches what `__session__.env` says it should be — if not, the banner now emits a one-line `⚠ routing INACTIVE` warning naming the gap. No silent failure.
+
+If you'd rather not edit your shell profile, the alternative is to `export ANTHROPIC_BASE_URL=http://localhost:4000` manually in every terminal before `claude`. That works too; it's just the same step done by hand each time.
+
 ## 1. Install Ollama
 
 | OS | One-liner |
