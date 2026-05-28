@@ -13,7 +13,7 @@ This is the bridge between "we just inherited this codebase" and "this codebase 
 
 ## LSP-aware (optional, recommended)
 
-The handover deep-dive — reading the codebase to populate the assessment — performs semantic code navigation: finding definitions, walking references, tracing handlers across modules. With LSP enabled (`ENABLE_LSP_TOOL=1` + per-language plugin per `docs/getting-started.md`) **and** the repo cloned locally (see the clone-first prompt from me2resh/apexyard#188), queries are ~3-15× cheaper in token cost than grep + Read on shallow lookups, and ~1.4-5× cheaper on multi-hop traces. Without LSP — or when only metadata is available — the skill falls back to grep + Read transparently. No new failure mode, just optional speed during the deep-dive phase.
+The handover deep-dive — reading the codebase to populate the assessment — performs semantic code navigation: finding definitions, walking references, tracing handlers across modules. When a Git URL is given, the skill clones the repo into `workspace/<name>/` at step 1.5-clone (default, before any reads begin). With LSP enabled (`ENABLE_LSP_TOOL=1` + per-language plugin per `docs/getting-started.md`) **and** the repo cloned locally, queries are ~3-15× cheaper in token cost than grep + Read on shallow lookups, and ~1.4-5× cheaper on multi-hop traces. Without LSP — or when only metadata is available — the skill falls back to grep + Read transparently. No new failure mode, just optional speed during the deep-dive phase.
 
 Per-language LSP plugins live in Claude Code's marketplace. Install once; the skill detects the active language and dispatches automatically.
 
@@ -86,11 +86,53 @@ If the user requests work outside the handover's scope mid-session, tell them: "
 
 ### 1. Locate the target repo
 
-If a path is given, use it. If a URL is given, prompt the user to clone it into `workspace/<name>/` first (don't clone automatically — that's a side-effect with cost). If nothing is given, ask:
+If a path is given, use it. If a URL is given, proceed immediately to clone it into `workspace/<name>/` (see step 1.5-clone below) — the user does not need to clone manually. If nothing is given, ask:
 
 ```
 Where is the target repo? Local path or git URL?
 ```
+
+### 1.5-clone. Clone the repo (URL path only — default yes)
+
+When the operator provides a Git URL (step 1), clone it immediately before doing any further reads. Default is **yes** — no confirmation needed unless the operator explicitly passes `--no-clone` on the skill invocation. This is the cheapest moment: subsequent reads in steps 2–6 are 3–15× cheaper per query against a local clone than via the GitHub API.
+
+#### Resolve the workspace dir and clone
+
+```bash
+source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-read-config.sh"
+source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-portfolio-paths.sh"
+WORKSPACE_DIR=$(portfolio_workspace_dir)
+mkdir -p "$WORKSPACE_DIR"
+
+if [ -d "$WORKSPACE_DIR/<name>/.git" ]; then
+  echo "✓ $WORKSPACE_DIR/<name>/ already exists — skipping clone."
+else
+  git clone <repo-url> "$WORKSPACE_DIR/<name>"
+fi
+```
+
+In single-fork mode `WORKSPACE_DIR` resolves to `<ops-root>/workspace`; in split-portfolio v2 mode it resolves to the sibling private repo (e.g. `../<fork>-portfolio/workspace`). Don't hardcode `workspace/<name>/`.
+
+After a successful clone, trigger an MCP reindex immediately so `search_code` returns results during the deep-dive phases that follow. The reindex is best-effort — skip silently if the MCP server is not available.
+
+```
+# Best-effort reindex — don't block the handover on MCP availability
+mcp__apexyard-search__reindex(scope="project", project="<name>")
+```
+
+#### On clone failure
+
+If the clone fails (private repo without credentials, network error, repo moved): report the exit code, point at `gh auth login` or a manual `git clone <repo-url> "$WORKSPACE_DIR/<name>"` as the recovery, and continue with the local-path fallback. Do **not** retry or invent an alternative URL. The operator picks up from there.
+
+If the operator explicitly passed `--no-clone` on the `/handover` invocation, skip this step silently and set `$CLONE_STATUS="declined"` for the step 10 summary.
+
+#### Set the clone marker
+
+```bash
+CLONE_STATUS="cloned"   # or "preserved" | "declined" | "failed: <reason>"
+```
+
+All subsequent reads in steps 2–6 use `$WORKSPACE_DIR/<name>/` as the repo root whenever `$CLONE_STATUS` is `cloned` or `preserved`. When `$CLONE_STATUS` is `declined` or `failed`, fall back to GitHub API reads via `gh api` / `gh -R <owner/name> …` (degraded but functional).
 
 ### 1.5. Pick a topology (default: skip / custom)
 
@@ -126,6 +168,8 @@ If `$PICKED_TOPOLOGY=""`, print nothing — the rest of the flow is unchanged.
 
 ### 2. Read the surface area
 
+Use `$WORKSPACE_DIR/<name>/` as `<repo>` when available (clone succeeded or path was given). Fall back to GitHub API reads only when `$CLONE_STATUS` is `declined` or `failed`. Local reads are preferred — they are cheaper and more complete.
+
 Without running anything destructive, gather:
 
 ```bash
@@ -147,7 +191,7 @@ ls <repo>/.github/workflows/ 2>/dev/null
 git -C <repo> log -1 --format='%h %ai %an %s'
 git -C <repo> shortlog -sn --no-merges | head -10
 
-# Open issues / PRs (if it's a GitHub repo)
+# Open issues / PRs (if it's a GitHub repo — always from the API regardless of clone status)
 gh -R <owner/name> issue list --state open --json number,title,labels --limit 10
 gh -R <owner/name> pr list --state open --json number,title --limit 10
 ```
@@ -893,93 +937,54 @@ Filed follow-up tickets:
   #42 — /bug  — Fix 7 failing tests in src/api/orders — <repo URL>
 ```
 
-### 8. Offer the clone-first deep-dive option (recommended)
+### 8. Offer follow-up deep-dive skills (against the already-cloned repo)
 
-You've just produced a metadata-only handover. The next natural step is a deeper dive — security audit, threat model, code-quality assessment. Those skills benefit substantially from a local clone + LSP-aware tooling, so offer the clone-first path here, with the cost transparently disclosed. Default is **no clone** — the operator has to type `y` explicitly.
+The repo was cloned in step 1.5-clone (or was already local). Offer follow-up deep-dive skills that benefit from the local clone + LSP tooling. This replaces the old "clone first" offer — cloning happened earlier, so this step is purely about what to run next.
 
-#### What to ask
+#### Branching on clone status
 
-Print a single offer block. Use the project name resolved earlier in the flow as `<name>`, and the registry's `repo` field (or the URL the operator gave in step 1) as `<repo-url>`. Don't paraphrase — the prompt below is the exact shape:
+**If `$CLONE_STATUS` is `cloned` or `preserved`:**
+
+Print a single follow-up offer after the step 10 summary:
 
 ```
-Want me to clone <name> into workspace/<name>/ now? It enables
-LSP-aware navigation in /code-review, /threat-model, /security-review
-and the post-handover discovery skills (~3-15× cheaper than grep on
-shallow semantic queries; ~1.4-5× on multi-hop traces).
+✓ <name> is cloned at $WORKSPACE_DIR/<name>/ and indexed in MCP.
+  Want to run any of the following against the clone now?
 
-Cost: ~tens of MB on disk + a one-time clone. The clone is gitignored
-from your fork (workspace/*/).
+  1. /threat-model <name>   — STRIDE threat model (recommended for first handover)
+  2. /security-review <name> — Security Auditor pass on the codebase
+  3. /code-review <name>    — Rex code-quality review
 
-Note: LSP requires `ENABLE_LSP_TOOL=1` and a per-language Claude Code
-LSP plugin installed (the plugin install is your problem — it's not
-bundled). Cross-project semantic queries still need grep (LSP is
-per-workspace). Cold-start on large monorepos can be 30+ seconds.
-Decline now if you'd rather configure that first or skip the deep dive.
+  Note: LSP-aware navigation requires ENABLE_LSP_TOOL=1 and a per-language
+  Claude Code LSP plugin installed. Cross-project queries still need grep
+  (LSP is per-workspace). Cold-start on large monorepos can be 30+ seconds.
 
-[y / n / later]
+[1/2/3/all/none — default none]
 ```
 
-#### Cost-transparency requirements
+Accept:
 
-The offer **must** explicitly disclose:
+- `1`, `2`, `3` — run that specific skill
+- `all` — run all three in sequence
+- `none` or empty — skip; the operator can invoke any skill manually later
 
-1. **`ENABLE_LSP_TOOL=1`** — the env var the harness reads to enable LSP
-2. **Per-language plugin install is the adopter's problem** — don't pretend the clone alone enables LSP
-3. **Disk cost** (~tens of MB) and gitignored status (`workspace/*/`)
-4. **Cross-project queries still need grep** — LSP is per-workspace
-5. **Cold-start cost on large monorepos** — 30+ seconds is realistic per the spike
+The skill never invokes follow-up skills automatically — the operator explicitly selects. On `none` / empty, continue to the final summary with no side effects.
 
-If any of these aren't surfaced in the offer, the adopter accepts a deal they don't understand. Don't compress the prompt past these five.
+**If `$CLONE_STATUS` is `declined`:**
 
-#### Branching
+Skip this step silently. The operator consciously opted out of cloning; don't re-offer.
 
-**On `y`:**
+**If `$CLONE_STATUS` is `failed: <reason>`:**
 
-1. Resolve `<repo-url>`. If the registry already has the repo slug (`me2resh/<name>` form), translate to `https://github.com/<owner>/<name>.git`. If the operator gave a path in step 1 instead of a URL, fall back to asking for the clone URL — never invent one.
+Print a brief recovery note only — don't re-attempt the clone:
 
-2. Resolve the workspace dir via the portfolio helper, then skip cleanly if the project clone already exists:
+```
+Note: the clone of <name> failed earlier (<reason>). Once you have a local
+copy at $WORKSPACE_DIR/<name>/, you can run /threat-model, /security-review,
+or /code-review against it directly.
+```
 
-   ```bash
-   source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-read-config.sh"
-   source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-portfolio-paths.sh"
-   WORKSPACE_DIR=$(portfolio_workspace_dir)
-   mkdir -p "$WORKSPACE_DIR"
-
-   if [ -d "$WORKSPACE_DIR/<name>" ]; then
-     echo "✓ $WORKSPACE_DIR/<name>/ already exists — skipping clone."
-   else
-     git clone <repo-url> "$WORKSPACE_DIR/<name>"
-   fi
-   ```
-
-   In single-fork mode `WORKSPACE_DIR` resolves to `<ops-root>/workspace`; in split-portfolio v2 mode it resolves to the sibling private repo (e.g. `../<fork>-portfolio/workspace`). Don't hardcode `workspace/<name>/`.
-
-3. On clone failure (private repo without credentials, network error, repo moved): report the exit code, point at `gh auth login` or a manual `git clone` as the recovery, and continue to the final summary. Do **not** retry, do **not** fall back to a different URL — the operator picks up from there.
-
-4. On clone success, trigger an MCP reindex for the new project so `search_code` returns results immediately (without waiting for the next session start). The reindex is best-effort — if the MCP server isn't running or the tool isn't available, skip silently.
-
-   ```
-   # Best-effort reindex — don't block the handover on MCP availability
-   mcp__apexyard-search__reindex(scope="project", project="<name>")
-   ```
-
-5. After clone + reindex, suggest the next skill as a single follow-up question:
-
-   ```
-   ✓ Cloned into $WORKSPACE_DIR/<name>/.
-     MCP index updated — search_code now covers <name>.
-     Want to run /threat-model against the new clone now? (y/n)
-   ```
-
-   If the operator declines, mention `/code-review` and `/security-review` as the other natural follow-ups, then continue to the final summary. The skill never invokes follow-up skills automatically — the operator confirms each one.
-
-**On `n` or `later`:**
-
-Skip silently — no side effects, no further prompts. The adopter can clone manually anytime with `git clone <repo-url> "$WORKSPACE_DIR/<name>"`. Continue to the final summary.
-
-**On any other input:**
-
-Treat as `n` (no clone). Don't loop the prompt — the offer is one-shot.
+Then continue to the final summary.
 
 ### 9. Offer validation (conditional, default-no)
 
@@ -1002,7 +1007,7 @@ Architecture stub:           projects/{name}/architecture/container.md ({written
 Topology bundle:             {"<name>@<version> instantiated (handbooks + AgDR draft + CI pipelines)" | "declined" | "skipped (no pick)" | "pipelines pending — workspace not cloned"}
 Registry updated:            apexyard.projects.yaml ({added | skipped})
 Next-step tickets filed:     {N filed of M offered | none offered (zero risks) | declined (skipped all) | skipped (registry not appended)}
-Workspace clone:             workspace/{name}/ ({cloned | preserved | skipped (declined) | skipped (later) | failed: <reason>})
+Workspace clone:             workspace/{name}/ ({cloned at step 1.5 | preserved (already existed) | declined (--no-clone) | failed: <reason> | n/a (local path given)})
 Validation:                  {"completed — verdict <GREEN|YELLOW|RED>" | "skipped" | "not offered (project is active)"}
 
 Tech stack: {one-liner}
@@ -1029,7 +1034,7 @@ Filed follow-up tickets:
 4. **Auto-append to the registry** (with confirmation) — don't leave the user to copy-paste a snippet. Propose the append, validate the resulting YAML, roll back on failure.
 5. **Derive roles from the stack** — don't hard-code `[tech-lead, backend-engineer]`. The roles list depends on the actual tech stack, CI config, and security surface detected in step 3.
 6. **Derive next steps from the risks** — don't emit generic placeholders. Every "Next Step" must correspond to a specific finding from the Quality Risks section of the assessment.
-7. **Never auto-clone** — ask for the path in step 1, and offer (default-no) the optional clone in step 8. Clone only happens on an explicit operator `y`; `n` / `later` / unrecognised input all skip cleanly.
+7. **Clone immediately when a URL is given** — when the operator provides a Git URL in step 1, clone it into `workspace/<name>/` in step 1.5-clone without asking (default-yes). The only opt-out is an explicit `--no-clone` flag on the skill invocation. When only a local path is given, use it directly — no clone needed. The old "offer the clone at the end (step 8)" pattern is gone; cloning first makes every subsequent read cheaper.
 8. **Never store secrets** — if `.env` is found, list its presence but never read its contents.
 9. **Status starts at `handover`** — moves to `active` only after the integration plan is executed.
 10. **Never break the registry** — if the YAML append breaks the file, restore the previous version and ask the user to edit manually.
