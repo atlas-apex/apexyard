@@ -76,7 +76,7 @@ if [ -f "$HOOK_DIR/_lib-read-config.sh" ]; then
   PR_TYPES=$(config_get '.pr.title_type_whitelist[]' 2>/dev/null | paste -sd'|' -)
 fi
 if [ -z "$PR_TYPES" ]; then
-  PR_TYPES="feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+  PR_TYPES="feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|release|spike|sync"
 fi
 
 TICKET_REF=""

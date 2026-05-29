@@ -59,6 +59,8 @@ git checkout -b sync/main-to-dev-after-<version> upstream/dev
 
 The branch is based on `upstream/dev` (NOT `upstream/main`). This is intentional — we're merging main INTO dev, not branching from main.
 
+> **`sync` is a whitelisted type** (apexyard#458). The `sync/` branch prefix, the `sync:` commit subject, and the `sync(#N):` PR title are all accepted by the branch / commit / PR-title validators. The branch name `sync/main-to-dev-after-vN.N.N` is also exempt from the `{type}/{TICKET-ID}-{desc}` ticket-id requirement (same narrow exception as `release/vN.N.N`) — the release being synced is the ticket. The PR title still references a live OPEN ticket via `sync(#N):` (use the release-cut ticket or a dedicated sync ticket), since `validate-pr-create.sh` checks ticket existence independent of the type.
+
 ### 5. Merge main with `-X ours`
 
 ```bash
