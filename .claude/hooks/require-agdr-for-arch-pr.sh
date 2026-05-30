@@ -148,6 +148,48 @@ if [ -z "$REPO_ROOT" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 2a-i. Cross-repo guard (me2resh/apexyard#464).
+#
+# When the hook fires on a `gh pr create --repo <X>` command but the current
+# git working tree belongs to a DIFFERENT repo (e.g. the session is pinned to
+# the ops-fork while the command targets a sibling repo), the diff computed
+# below reflects the ops-fork's changed files — NOT the PR's actual diff.
+# That produces false-positive blocks for PRs that don't touch any framework
+# architecture paths.
+#
+# Fix: compare the PR target repo (--repo flag, or implicit same-repo) to the
+# origin remote of the current working tree. If they differ, we cannot compute
+# a meaningful diff for this PR from this cwd → exit 0 (no-op).
+#
+# Framework gating is preserved: when creating a me2resh/apexyard PR from the
+# framework cwd, the --repo value matches origin → the guard does NOT fire and
+# the diff check runs as usual.
+# ---------------------------------------------------------------------------
+
+HOOK_DIR_AGDR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$HOOK_DIR_AGDR/_lib-pr-repo.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$HOOK_DIR_AGDR/_lib-pr-repo.sh"
+  if ! pr_repo_matches_cwd "$COMMAND" "$REPO_ROOT"; then
+    # PR targets a different repo than this working tree — cannot evaluate
+    # the arch-path diff from here. Silently pass; the hook in that repo's
+    # own CI context will gate this correctly.
+    exit 0
+  fi
+else
+  # _lib-pr-repo.sh is missing (partial checkout or manual hook copy without
+  # the lib). The cross-repo guard cannot run, which means a `gh pr create
+  # --repo <sibling>` command will fall through to the ops-fork diff — exactly
+  # the false-positive bug #464 this guard was introduced to prevent.
+  # Emit a loud warning so the degradation is visible; do NOT silently revert.
+  # Match all four flag forms: --repo VALUE, --repo=VALUE, -R VALUE, -R=VALUE.
+  CMD_REPO_PRESENT=$(printf '%s' "$COMMAND" | grep -cE '(^|[[:space:]])(--repo[=[:space:]]|-R[=[:space:]])' || true)
+  if [ "${CMD_REPO_PRESENT:-0}" -gt 0 ]; then
+    echo "WARN: require-agdr-for-arch-pr.sh: _lib-pr-repo.sh not found at $HOOK_DIR_AGDR — cross-repo guard DEGRADED. A \`gh pr create --repo <sibling>\` command will be evaluated against the current working tree's diff, which may produce false-positive blocks (me2resh/apexyard#464). Ensure _lib-pr-repo.sh is present alongside this hook." >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 2b. Spike exemption (apexyard#180).
 #
 # Spike work is hypothesis-driven, time-boxed, throw-away exploration. AgDRs
