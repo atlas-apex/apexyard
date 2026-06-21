@@ -2,7 +2,7 @@
 
 > In the context of [AgDR-0050](AgDR-0050-agent-runtime-overhaul.md)'s per-agent model matrix (build engineers → `sonnet`, reviewers → `opus`, analysts → `haiku`), facing operator reports that the **main agent dominates token spend** despite that matrix, I decided to **document the structural tension** — the matrix only applies to *spawned* sub-agents, but AgDR-0050 § Axis 6 deliberately keeps *in-flow* work (implementation / PM / design) **in-thread**, so the bulk of work runs on the operator's primary tier (typically Opus) and the `sonnet` implementation default never takes effect — and to record the recommended cost levers (`opusplan`, a thin-orchestrator pattern, and populating `agent-routing.yaml`) rather than silently re-litigating the Axis-6 decision, to achieve a predictable + documented cost model for operators, accepting that the biggest single win (`opusplan`) is a harness-level operator choice the framework can recommend but not enforce.
 >
-> **Status**: ACCEPTED — documentation + frontmatter-drift fix. Does not change the Axis-6 in-thread-vs-spawned split; it makes that split's cost consequence explicit and gives operators the levers to manage it.
+> **Status**: ACCEPTED — documentation + frontmatter-conformance confirmation. Does not change the Axis-6 in-thread-vs-spawned split; it makes that split's cost consequence explicit and gives operators the levers to manage it.
 
 **Metadata** — Status: ACCEPTED · Category: architecture · Supersedes: none · Related: [AgDR-0050](AgDR-0050-agent-runtime-overhaul.md) (agent runtime overhaul — the per-agent matrix + Axis 6 in-thread/spawned split), [AgDR-0068](AgDR-0068-governed-looping.md) (governed looping — the thin-orchestrator-as-loop-coordinator shape), [`.claude/rules/plan-mode.md`](../../.claude/rules/plan-mode.md) (`opusplan` prior art). (Body-H1 only, no YAML frontmatter — per the live convention; markdownlint MD025 trips on a YAML title + body H1 together.)
 
@@ -68,15 +68,15 @@ Three levers, not mutually exclusive, ordered by effort-to-win ratio:
 - **The cost model is documented, not surprising.** Operators reading `docs/orchestrator-cost-model.md` understand *why* the main agent dominates spend (in-flow work is in-thread by Axis-6 design) and *what to do about it* (the three levers).
 - **Axis 6 is unchanged.** In-flow roles keep in-thread adoption; shared-context benefit preserved. This AgDR adds no new spawn behaviour.
 - **The thin-orchestrator pattern is an opt-in mode**, not a default. Operators who want the matrix to apply to implementation spawn build agents via `/fan-out` / `Workflow` and keep the Opus loop thin (planner / coordinator). This composes directly with [AgDR-0068](AgDR-0068-governed-looping.md) — a governed loop with an Opus coordinator and spawned Sonnet build agents is exactly the thin-orchestrator shape, with the loop's halt-at-the-merge-gate guardrails.
-- **Build-engineer tiers are pinned + matrix-conformant.** `backend-engineer` / `frontend-engineer` = `sonnet`. The drift guard (`block-agent-routing-drift.sh`, from AgDR-0050 Axis 4) catches accidental re-drift on commit / push; intentional framework-default changes go via PR.
-- **No review-routing regression.** Rex / Hakim stay `opus`; Nour stays `sonnet`. Only the two build-engineer tiers are touched.
+- **Build-engineer tiers are confirmed matrix-conformant.** `backend-engineer` / `frontend-engineer` are already `sonnet` on `dev` — no agent file is edited by this AgDR. The drift guard (`block-agent-routing-drift.sh`, from AgDR-0050 Axis 4) catches any future re-drift on commit / push; operators can additionally pin the tiers via `agent-routing.yaml` so the matrix value is explicit.
+- **No review-routing regression.** Rex / Hakim stay `opus`; Nour stays `sonnet`. No agent frontmatter changes in this PR.
 - **`agent-routing.yaml` remains the per-adopter tuning surface.** The docs now point operators at it as a cost lever (pin tiers, route specific agents through cheaper models), closing the "ships empty, tuning surface unused" gap noted in the ticket.
 
 ## Artifacts
 
 - This AgDR file: `docs/agdr/AgDR-0073-orchestrator-cost-model.md`
 - Operator-facing cost-lever doc: `docs/orchestrator-cost-model.md`
-- Agent frontmatter pinned to the matrix: `.claude/agents/backend-engineer.md`, `.claude/agents/frontend-engineer.md`
+- Agent frontmatter confirmed matrix-conformant (unchanged by this PR): `.claude/agents/backend-engineer.md`, `.claude/agents/frontend-engineer.md` (both `model: sonnet`)
 - Related AgDRs:
   - [AgDR-0050 — agent runtime overhaul](AgDR-0050-agent-runtime-overhaul.md) — the per-agent matrix (Axis 2) + the Axis-6 in-thread/spawned split this AgDR documents the cost consequence of
   - [AgDR-0068 — governed looping](AgDR-0068-governed-looping.md) — the loop shape the thin-orchestrator pattern composes with
