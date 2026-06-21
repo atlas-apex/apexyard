@@ -7,10 +7,12 @@ All notable changes to ApexYard are documented here.
 Minor release — 2 features.
 
 ### Added (feat)
+
 - (#674) automate /release — one-command bump + changelog + release PR — 41a2e5a
 - (#672) add /walking-skeleton + /prototype skills — 0f028c1
 
 ### Closes
+
 - Closes #672, #674
 
 ## [3.2.0] — 2026-06-17
