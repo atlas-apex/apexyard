@@ -14,6 +14,7 @@ Reusable GitHub Actions workflows that integrate ApexYard's automated agents int
 | `review-check.yml` | Rex (verification) | Block merge if Rex hasn't reviewed the latest commit | Every PR + review event |
 | `seo-check.yml` | SEO Check | SEO analysis for content files | Content changes |
 | `ci.yml` | Combined | All checks in one pipeline | Every PR |
+| `auto-tag-on-release-pr-merge.yml` | Release | Auto-tag squash commit + create GitHub Release when a `release/v*` PR merges to main | PR merge (`release/v*` → main) |
 
 ---
 
