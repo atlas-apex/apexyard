@@ -65,7 +65,7 @@ run_test() {
   local tmpdir
   tmpdir=$(mktemp -d)
   (
-    cd "$tmpdir"
+    cd "$tmpdir" || exit 1
     git init -q
     git config user.email "test@test.local"
     git config user.name "Test"
