@@ -1,6 +1,6 @@
 # Role Triggers — When to Activate Which Role
 
-ApexYard ships **20 role definitions** in `roles/{department}/`. They are not all loaded into every session (context efficiency — 20 files × ~120 lines averages out to ~23k tokens, most of which are idle during any given task). Instead, a role is **activated** when a specific condition is met: you read the role file, adopt its identity, responsibilities, and constraints for the duration of the task, then hand off to the next role in the chain.
+ApexYard ships **22 role definitions** in `roles/{department}/`. They are not all loaded into every session (context efficiency — 22 files × ~120 lines averages out to ~25k tokens, most of which are idle during any given task). Instead, a role is **activated** when a specific condition is met: you read the role file, adopt its identity, responsibilities, and constraints for the duration of the task, then hand off to the next role in the chain.
 
 ## Activation Table
 
@@ -26,6 +26,8 @@ ApexYard ships **20 role definitions** in `roles/{department}/`. They are not al
 | **Head of Data** | `roles/data/head-of-data.md` | Analytics strategy · data governance · reporting architecture · cross-project data modelling |
 | **Data Analyst** | `roles/data/data-analyst.md` | SQL queries · dashboards · A/B-test analysis · metric investigation |
 | **Data Engineer** | `roles/data/data-engineer.md` | ETL pipelines · data modelling · data-quality work · warehouse schema changes |
+| **Head of Growth** | `roles/growth/head-of-growth.md` | Go-to-market strategy · positioning · launch-plan decision · pricing-communication strategy · growth-funnel call · channel-mix decision |
+| **Growth Manager** | `roles/growth/growth-manager.md` | GTM-asset authoring (launch announcement / landing copy / lifecycle messaging) · launch execution · growth-experiment run · campaign work |
 
 ## Activation Protocol
 
@@ -89,6 +91,8 @@ This is a **prose convention**, not a mechanically-enforced format. The sibling 
 | Roadmap question or prioritization call | Head of Product |
 | User flow / wireframe / IA question | UX Designer |
 | Component spec / design tokens question | UI Designer |
+| Positioning / launch-plan / pricing-communication strategy call | Head of Growth |
+| GTM-asset / launch-announcement / landing-copy / campaign request | Growth Manager |
 | Cross-project strategy question | The relevant Head of _ role |
 
 **Prompted activation** — the user explicitly asks for a role:
@@ -166,7 +170,7 @@ Triggers wired in v1 (me2resh/apexyard#206):
 
 A migration AgDR fires **both** the Tech Lead trigger (`docs/agdr/**`, author) and the Solution Architect trigger (`docs/agdr/*migration*.md`, reviewer) — the two are additive by design: Hisham authors, Tariq reviews.
 
-Triggers from the table above that are **not** yet mechanically detected (e.g. "production incident mentioned" → SRE, "new PRD drafted" → Product Manager) still rely on self-discipline; the hook can be extended without changing the surrounding wiring.
+Triggers from the table above that are **not** yet mechanically detected (e.g. "production incident mentioned" → SRE, "new PRD drafted" → Product Manager, "positioning / launch / GTM-asset request" → Head of Growth / Growth Manager) still rely on self-discipline plus the **prompted-activation** path (the Growth roles are wired into the `UserPromptSubmit` trigger's roles table, so "act as the Head of Growth" / "act as the Growth Manager" fire). The hook can be extended with diff-path triggers for Growth without changing the surrounding wiring — Growth work is request-shaped (no canonical file-path signature like `**/auth/**`), so prompted activation is the primary mechanical path.
 
 Tests live at `.claude/hooks/tests/test_detect_role_trigger.sh` and cover the three trigger families the acceptance criteria call out.
 

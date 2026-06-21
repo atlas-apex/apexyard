@@ -309,6 +309,8 @@ ux designer|roles/design/ux-designer.md
 head of data|roles/data/head-of-data.md
 data analyst|roles/data/data-analyst.md
 data engineer|roles/data/data-engineer.md
+head of growth|roles/growth/head-of-growth.md
+growth manager|roles/growth/growth-manager.md
 '
 
 detect_prompt_triggers() {

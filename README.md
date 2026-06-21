@@ -23,7 +23,7 @@ apexyard/
 ├── CLAUDE.md              # Stack entry point -- Claude Code reads this first
 ├── onboarding.yaml        # Your company config -- fill this in to adopt the stack
 │
-├── roles/                 # AI agent role definitions (20 across 6 departments)
+├── roles/                 # AI agent role definitions (22 across 7 departments)
 │   ├── engineering/       # Backend, Frontend, QA, Platform, SRE, Tech Lead, Head of Eng
 │   ├── architecture/      # Solution Architect (Tariq)
 │   ├── product/           # Product Manager, Product Analyst, Head of Product
@@ -48,7 +48,7 @@ apexyard/
 │   ├── settings.json      # Hook wiring (PreToolUse, PostToolUse, SessionStart)
 │   ├── hooks/             # 40 shell scripts — ticket-first, migration gate, two-marker merge gate, red-CI block, secrets scan, branch/PR validation, leak protection, MCP-reindex advisories, upstream-drift banner
 │   ├── rules/             # 12 modular rule files imported via @.claude/rules/* (agdr-decisions, code-standards, git-conventions, leak-protection, loop-mode, parallel-work, plan-mode, pr-quality, pr-workflow, role-triggers, ticket-vocabulary, workflow-gates)
-│   ├── agents/            # 24 sub-agents — Rex (Code Reviewer), Hakim (Security Auditor), Tariq (Solution Architect), the engineering / product / design / data / security personas, plus utility agents (PR & ticket managers, dependency auditor)
+│   ├── agents/            # 26 sub-agents — Rex (Code Reviewer), Hakim (Security Auditor), Tariq (Solution Architect), the engineering / product / design / data / security / growth personas, plus utility agents (PR & ticket managers, dependency auditor)
 │   └── skills/            # 59 slash commands — see CLAUDE.md for the full list
 │
 ├── workspace/             # Live local clones of managed projects — gitignored
@@ -158,7 +158,7 @@ Keeping a fork current — upgrade in place, when to re-fork instead, and how to
 
 **The problem**: Claude Code is powerful, but without structure it produces inconsistent results. Every team reinvents the same processes -- role definitions, review checklists, document templates, workflow gates.
 
-**The solution**: ApexYard provides that structure as a reusable, open-source stack. One config file to customize, 20 role definitions to use, battle-tested workflows to follow, and 40 shell hooks that enforce the rules mechanically.
+**The solution**: ApexYard provides that structure as a reusable, open-source stack. One config file to customize, 22 role definitions to use, battle-tested workflows to follow, and 40 shell hooks that enforce the rules mechanically.
 
 ### What makes it different
 
@@ -177,7 +177,7 @@ Keeping a fork current — upgrade in place, when to re-fork instead, and how to
 
 ## Roles
 
-ApexYard includes 20 software development roles across 6 departments:
+ApexYard includes 22 software development roles across 7 departments:
 
 ### Engineering (7 roles)
 
@@ -216,6 +216,11 @@ ApexYard includes 20 software development roles across 6 departments:
 - **Head of Data** -- Analytics strategy, data governance, reporting
 - **Data Analyst** -- SQL, dashboards, A/B testing, metrics
 - **Data Engineer** -- ETL pipelines, data modeling, data quality
+
+### Growth (2 roles)
+
+- **Head of Growth** (Layla) -- Go-to-market strategy, positioning, launch plans, growth funnel
+- **Growth Manager** (Bilal) -- GTM assets, launch announcements, landing copy, growth experiments
 
 ## Workflows
 

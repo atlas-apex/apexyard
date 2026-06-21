@@ -328,6 +328,32 @@ else
   PASS=$((PASS+1))
 fi
 
+# --- (6) Growth department (#666) — prompted activation ----------------------
+# Growth work is request-shaped (no canonical diff-path signature), so the
+# primary mechanical path is prompted activation via the UserPromptSubmit
+# roles table.
+
+# 6a. Head of Growth (isolated-work-class) — banner instructs SPAWN with
+#     subagent_type: head-of-growth.
+in=$(jq -nc \
+  --arg prm "act as the head of growth and draft the launch plan" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+run_case "growth: 'as the head of growth' → isolated-work-class banner" 0 \
+  "Head Of Growth.*Isolated-work-class.*subagent_type: head-of-growth" "$in"
+
+# 6b. Growth Manager (in-flow-class) — banner instructs in-thread adoption.
+in=$(jq -nc \
+  --arg prm "put on your growth manager hat and write the announcement" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+run_case "growth: 'growth manager hat' → in-flow-class banner" 0 \
+  "Growth Manager.*In-flow-class.*adopt the persona IN-THREAD" "$in"
+
+# 6c. Plain mention of growth without an activation phrase → silent.
+in=$(jq -nc \
+  --arg prm "the growth numbers looked good this quarter" \
+  '{hook_event_name:"UserPromptSubmit", prompt:$prm}')
+run_case "growth: passing mention is silent" 0 "" "$in"
+
 # --- Summary -----------------------------------------------------------------
 
 echo ""
