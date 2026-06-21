@@ -61,7 +61,7 @@ Three levers, not mutually exclusive, ordered by effort-to-win ratio:
 
 3. **Axis C — all three levers, documented in operator-facing docs** (`docs/orchestrator-cost-model.md`, cross-referenced from `docs/getting-started.md`), in effort-to-win order: `opusplan` first (biggest win, no framework change), thin-orchestrator second (recovers the matrix for implementation via spawning), `agent-routing.yaml` third (per-adopter tuning surface).
 
-4. **Frontmatter drift fix.** `backend-engineer` and `frontend-engineer` agent files are pinned to `model: sonnet` per the AgDR-0050 Axis-2 matrix. Review-agent routing is unchanged: Rex (`code-reviewer`) and Hakim (`security-reviewer`) stay `opus`; Nour (`ui-designer`) stays `sonnet`. No other agent's tier changes.
+4. **Frontmatter drift fix — confirm + guard.** `backend-engineer` and `frontend-engineer` agent files must read `model: sonnet` per the AgDR-0050 Axis-2 matrix. On the `dev` branch they are *already* `sonnet` (the `opus` drift the ticket describes existed only in an uncommitted working tree, never on `dev`), so this AgDR records the conformant state rather than editing the files — and points operators at `agent-routing.yaml` to *pin* these tiers so the drift can't silently recur. Review-agent routing is unchanged: Rex (`code-reviewer`) and Hakim (`security-reviewer`) stay `opus`; Nour (`ui-designer`) stays `sonnet`. No other agent's tier changes.
 
 ## Consequences
 
