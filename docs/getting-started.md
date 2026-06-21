@@ -184,6 +184,16 @@ Link-check (lychee) is intentionally excluded — it is slow and network-depende
 
 ---
 
+## Managing model cost — why the main agent dominates spend
+
+The per-agent model matrix ([AgDR-0050](agdr/AgDR-0050-agent-runtime-overhaul.md)) only applies to *spawned* sub-agents (reviews, QA, analysts). *In-flow* work — implementation, PM, design — is adopted **in-thread** by design, so it runs on your primary tier (usually Opus) and the `sonnet` implementation default never takes effect. That's why operators see the main agent dominating token spend.
+
+Three levers manage it, ordered by effort-to-win ratio: (1) **`opusplan`** — Opus plans, Sonnet executes (biggest win, no framework change); (2) the **thin-orchestrator pattern** — keep the Opus loop as a planner / coordinator and delegate implementation to spawned `sonnet` build agents via `/fan-out` or `Workflow`; (3) populate **`agent-routing.yaml`** to pin or route per-agent tiers.
+
+Full explanation + the opt-in thin-orchestrator mode: [`docs/orchestrator-cost-model.md`](orchestrator-cost-model.md).
+
+---
+
 ## Optional: LSP-aware code navigation
 
 Claude Code v2.0.74+ ships a built-in **LSP (Language Server Protocol) tool** that answers semantic queries — *"where is this defined?"*, *"where is this used?"*, *"what does this symbol resolve to?"* — by talking to a language server (`tsserver`, `pyright`, `gopls`, `rust-analyzer`, etc.) instead of grepping the file tree. It is **off by default** and **opt-in per session**.
