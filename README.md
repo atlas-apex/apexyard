@@ -29,7 +29,8 @@ apexyard/
 │   ├── product/           # Product Manager, Product Analyst, Head of Product
 │   ├── design/            # UI Designer, UX Designer, Head of Design
 │   ├── security/          # Security Auditor, Penetration Tester, Head of Security
-│   └── data/              # Data Analyst, Data Engineer, Head of Data
+│   ├── data/              # Data Analyst, Data Engineer, Head of Data
+│   └── growth/            # Head of Growth (Layla), Growth Manager (Bilal)
 │
 ├── workflows/             # Development lifecycle processes
 │   ├── sdlc.md            # Full SDLC including the database-migration sub-workflow
