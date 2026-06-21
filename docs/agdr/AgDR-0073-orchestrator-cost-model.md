@@ -24,7 +24,7 @@ The model matrix is a property of a **spawned sub-agent's frontmatter**. In-thre
 
 The net effect operators observe: the main agent dominates token spend, and the matrix's cost optimisation appears not to work. It *does* work — but only on the spawned minority, not the in-thread majority. AgDR-0050 § Consequences mentioned "cost of running sub-agents vs in-thread persona adoption" as a *risk to the sub-agent approach*; it did not flag the inverse — that the in-thread approach defeats the matrix for the work that costs the most. This AgDR records that tension explicitly.
 
-A compounding, separable issue: agent **frontmatter drift**. The matrix specifies `sonnet` for Backend + Frontend Engineer, but a working-tree drift had set those agent files to `model: opus` in some adopter forks — so even *spawning* a build engineer would not hit the cheap tier. (On the `dev` branch at the time of this AgDR the committed values were already `sonnet`; the fix here is to pin them and document the matrix-conformance check so the drift can't recur silently.)
+A compounding, separable issue: agent **frontmatter drift**. The matrix specifies `sonnet` for Backend + Frontend Engineer, but a working-tree drift had set those agent files to `model: opus` in some adopter forks — so even *spawning* a build engineer would not hit the cheap tier. (On the `dev` branch at the time of this AgDR the committed values were already `sonnet`, so this AgDR records the conformant state rather than editing the files; it documents the matrix-conformance check and points operators at `agent-routing.yaml` to pin the tiers so the drift can't recur silently.)
 
 ## Options Considered
 
