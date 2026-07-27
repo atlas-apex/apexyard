@@ -45,15 +45,68 @@ if [ -f "$HOOK_DIR/_lib-extract-push-ref.sh" ]; then
   PUSH_REF=$(extract_push_ref "$COMMAND")
 fi
 
+# When the push has no explicit source ref (no-arg `git push`, `git push
+# origin` relying on upstream tracking), we fall back to the current branch.
+# That fallback MUST be resolved against the repo the command actually runs
+# in — not the hook's own cwd. The harness fires this PreToolUse hook BEFORE
+# the shell executes the command, so a `cd <repo> && git push …` prefix has
+# NOT yet changed the working dir: the hook's cwd is still the ops fork (on,
+# e.g., `dev`). Without re-rooting, the fallback reads the ops-fork's branch
+# and false-blocks a push for a *different* managed repo (e.g. "Branch 'dev'
+# missing ticket ID"). Same class as #669/#687 for the merge gates + arch-PR
+# hook. See me2resh/apexyard#693.
+#
+# Re-root via pr_cmd_cd_target from _lib-pr-repo.sh: if the command begins
+# with `cd <path> && …`, resolve the fallback branch with `git -C <path>`.
+# When there's no leading `cd` (or <path> isn't a git tree), this is a no-op
+# and the fallback stays byte-for-byte equivalent to the pre-#693 behaviour.
+BRANCH_DIR=""
+if [ -f "$HOOK_DIR/_lib-pr-repo.sh" ]; then
+  # shellcheck disable=SC1090,SC1091
+  . "$HOOK_DIR/_lib-pr-repo.sh"
+  CD_TARGET=$(pr_cmd_cd_target "$COMMAND")
+  if [ -n "$CD_TARGET" ]; then
+    CD_TOPLEVEL=$(git -C "$CD_TARGET" rev-parse --show-toplevel 2>/dev/null)
+    if [ -n "$CD_TOPLEVEL" ]; then
+      BRANCH_DIR="$CD_TOPLEVEL"
+    fi
+    # If <path> is not a readable git tree, fall through with BRANCH_DIR empty
+    # — the fallback uses the hook's own cwd, no worse than pre-#693.
+  fi
+fi
+
 if [ -n "$PUSH_REF" ]; then
   CURRENT_BRANCH="$PUSH_REF"
+elif [ -n "$BRANCH_DIR" ]; then
+  CURRENT_BRANCH=$(git -C "$BRANCH_DIR" branch --show-current 2>/dev/null)
 else
   CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
 fi
 
 # Allow trunk and shared integration branches.
 # Match the dev/main release model (apexyard#116) — dev is a valid trunk.
-if [ "$CURRENT_BRANCH" = "main" ] || [ "$CURRENT_BRANCH" = "master" ] || [ "$CURRENT_BRANCH" = "develop" ] || [ "$CURRENT_BRANCH" = "dev" ]; then
+#
+# The trunk list is project-configurable via .claude/project-config.json
+# (.branch.trunk_whitelist), mirroring how .branch.type_whitelist is read
+# below. This covers client-mandated trunk names apexyard doesn't ship by
+# default (e.g. `trunk`, `staging`) without another upstream PR per name.
+# Defaults ship at .claude/project-config.defaults.json and include
+# `development` — the gitflow long form used as the integration branch by
+# many Bitbucket/gitflow remotes, missed by the original hardcoded exact-name
+# list. See me2resh/apexyard#888.
+REPO_ROOT_FOR_TRUNK=$(git rev-parse --show-toplevel 2>/dev/null)
+TRUNK_BRANCHES=""
+if [ -n "$REPO_ROOT_FOR_TRUNK" ] && [ -f "$REPO_ROOT_FOR_TRUNK/.claude/hooks/_lib-read-config.sh" ]; then
+  # shellcheck disable=SC1090,SC1091
+  . "$REPO_ROOT_FOR_TRUNK/.claude/hooks/_lib-read-config.sh"
+  TRUNK_BRANCHES=$(config_get '.branch.trunk_whitelist[]')
+fi
+# Fallback if config unavailable (jq missing, standalone install, no config
+# entry, etc.) — preserves today's behaviour plus the `development` fix.
+if [ -z "$TRUNK_BRANCHES" ]; then
+  TRUNK_BRANCHES=$'main\nmaster\ndevelop\ndev\ndevelopment'
+fi
+if echo "$TRUNK_BRANCHES" | grep -qxF "$CURRENT_BRANCH"; then
   exit 0
 fi
 

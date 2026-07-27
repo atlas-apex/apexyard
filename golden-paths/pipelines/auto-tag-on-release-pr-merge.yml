@@ -7,7 +7,7 @@ name: auto-tag-on-release-pr-merge
 # to tag is the squash commit on main (`github.sha` in a pull_request/closed
 # event), NOT the release branch's HEAD (which is discarded by the squash).
 #
-# Design rationale: AgDR-0072 (docs/agdr/AgDR-0072-release-automation.md)
+# Design rationale: AgDR-0076 (docs/agdr/AgDR-0076-release-automation.md)
 # Framework-only usage note: for the apexyard framework repo itself, the
 # workflow at .github/workflows/auto-tag-on-release-pr-merge.yml is used.
 # This golden-path copy is for managed projects or adopters that have adopted
@@ -124,12 +124,11 @@ jobs:
       - name: Extract release notes from PR body
         id: notes
         if: github.event_name == 'pull_request'
+        env:
+          GH_PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
-          PR_BODY=$(cat <<'PREOF'
-          ${{ github.event.pull_request.body }}
-          PREOF
-          )
+          PR_BODY="$GH_PR_BODY"
           # Extract the CHANGELOG section for this version (## [VERSION] ... next ## [)
           NOTES=$(echo "$PR_BODY" | \
             awk "/^## \[$VERSION\]/{found=1; next} found && /^## \[/{exit} found{print}")

@@ -4,7 +4,7 @@ apexyard uses a **release-cut** branch model (sometimes called gitflow-lite) for
 
 **Important — framework only.** This release model is for `me2resh/apexyard` itself, not for managed projects under apexyard governance. Managed projects stay trunk-based (PRs merge to `main`); only the framework has dev/main + tags. See `docs/multi-project.md` for the rationale.
 
-Decision records: [`docs/agdr/AgDR-0007-release-cut-branch-model.md`](agdr/AgDR-0007-release-cut-branch-model.md) · [`docs/agdr/AgDR-0072-release-automation.md`](agdr/AgDR-0072-release-automation.md).
+Decision records: [`docs/agdr/AgDR-0007-release-cut-branch-model.md`](agdr/AgDR-0007-release-cut-branch-model.md) · [`docs/agdr/AgDR-0076-release-automation.md`](agdr/AgDR-0076-release-automation.md).
 
 ## Branch model
 
@@ -48,7 +48,7 @@ The skill:
 2. Auto-detects the semver bump from conventional commits (or accepts explicit version)
 3. Calls `bin/release-changelog.sh` to generate the CHANGELOG section (independently testable helper)
 4. Shows the draft for review / editing
-5. Writes `CHANGELOG.md` (prepends the new section) and bumps `site/index.html` version strings
+5. Writes `CHANGELOG.md` (prepends the new section)
 6. Creates the release branch `release/vX.Y.Z` from dev, commits, and pushes
 7. Opens the release PR (dev→main) with the CHANGELOG section as body
 8. Stops at PR creation — CEO approval gate remains the sole human gate
@@ -57,7 +57,7 @@ After the PR merges, the `auto-tag-on-release-pr-merge.yml` CI workflow fires an
 
 - Tags the squash commit on `main` (using `github.sha` — always the correct commit, never the branch HEAD)
 - Runs the ancestry guard (`git merge-base --is-ancestor <sha> main`)
-- Creates a GitHub Release entry from the CHANGELOG section in the PR body
+- Creates a GitHub Release entry from the CHANGELOG section in the PR body (in the same job — a tag pushed via GITHUB_TOKEN does not trigger a secondary release workflow)
 
 Then run `/release-sync vX.Y.Z` to sync main→dev and prevent squash-divergence accumulation.
 
@@ -76,24 +76,60 @@ PREV_TAG=$(git describe --tags --abbrev=0 upstream/main)
 # e.g. PREV_TAG=v3.2.0, so next is v3.3.0 (minor bump because of feat: commits)
 VERSION=v3.3.0
 
-# 3. Generate the CHANGELOG section
+# 3. Generate the CHANGELOG section — capture stderr too: it carries the
+#    exact commit range the script used (trailer-anchored, or the #737
+#    sync-boundary fallback). The count-mismatch guard below needs it (#1002)
+#    — DO NOT substitute `git rev-list --count upstream/main..upstream/dev`;
+#    under the release-cut squash model that range only ever grows and always
+#    false-positives the guard (v5.2.0 cut: 402 raw commits vs. ~1 real entry).
 PREV_TAG="$PREV_TAG" HEAD_REF="upstream/dev" VERSION="$VERSION" DATE="$(date +%F)" \
-  bash bin/release-changelog.sh > /tmp/changelog-section.md
+  bash bin/release-changelog.sh > /tmp/changelog-section.md 2>/tmp/release-changelog-range.txt
+LOG_RANGE=$(grep -oE 'RELEASE_CHANGELOG_RANGE=.*' /tmp/release-changelog-range.txt | cut -d= -f2-)
 # Review and edit /tmp/changelog-section.md
+
+# #1017: fail CLOSED on a missing/unparseable range instead of letting an
+# empty $LOG_RANGE silently flow into `git rev-list --count ""` below (its
+# stderr never reaches $RAW_COUNT, so the guard would otherwise read a
+# "0 commits" pass — AgDR-0104: a gate that can't evaluate its precondition
+# must block, not allow).
+if [ -z "$LOG_RANGE" ]; then
+  echo "ERROR: RELEASE_CHANGELOG_RANGE missing from /tmp/release-changelog-range.txt — the count-mismatch guard has nothing to check. Do not proceed." >&2
+  exit 1
+fi
+RAW_COUNT=$(git rev-list --count "$LOG_RANGE") || {
+  echo "ERROR: 'git rev-list --count $LOG_RANGE' failed — cannot evaluate the count-mismatch guard. Do not proceed." >&2
+  exit 1
+}
+ENTRY_COUNT=$(grep -E '^- ' /tmp/changelog-section.md | grep -vcE '^- Closes ' || true)
+[ -n "$ENTRY_COUNT" ] || ENTRY_COUNT=0
+GAP=$(( RAW_COUNT - ENTRY_COUNT ))
+if [ "$GAP" -gt 5 ]; then
+  # #1017: RAW_COUNT and ENTRY_COUNT both derive from $LOG_RANGE now, so this
+  # gap means commits genuinely inside the range aren't classifying into
+  # changelog entries — not a truncated range (that failure mode is closed at
+  # the trailer-anchoring source; see AgDR-0094 and step 7b below).
+  echo "WARNING: $LOG_RANGE has $RAW_COUNT commits but the changelog lists only $ENTRY_COUNT entries (some commits inside the range didn't classify into an entry)." >&2
+fi
 
 # 4. Prepend to CHANGELOG.md
 cat /tmp/changelog-section.md CHANGELOG.md > /tmp/cl_new.md
 mv /tmp/cl_new.md CHANGELOG.md
 
-# 5. Bump site/index.html version strings (see SKILL.md § 3.5 for the full list)
-
-# 6. Cut release branch from dev
+# 5. Cut release branch from dev — the Released-From trailer goes in THIS
+#    commit message, as its own final paragraph. It is the sole commit on
+#    the branch, so it is what a squash merge carries forward (see step 7).
+DEV_SHA=$(git rev-parse upstream/dev)
 git checkout -b "release/$VERSION" upstream/dev
-git add CHANGELOG.md site/index.html
-git commit -m "chore: release $VERSION"
+git add CHANGELOG.md
+git commit -m "chore: release $VERSION
+
+Refs #<release-ticket>
+
+Released-From: $DEV_SHA"
 git push upstream "release/$VERSION"
 
-# 7. Open release PR
+# 6. Open release PR — the PR body ALSO carries the trailer as its own final
+#    line (human visibility on the PR page), matching the commit above.
 gh pr create \
   --repo me2resh/apexyard \
   --base main \
@@ -102,12 +138,25 @@ gh pr create \
   --body-file /tmp/release-pr-body.md
 # Add <!-- multi-close: approved --> to the body
 
-# 8. Run normal review flow on the PR
+# 7. Run normal review flow on the PR
 #    - /code-review
 #    - /approve-merge <pr>
-#    - gh pr merge <pr> --squash
+#    - Merge with an EXPLICIT subject + body — never a bare `gh pr merge
+#      --squash` (#1004). This repo has squash_merge_commit_message=
+#      COMMIT_MESSAGES, which builds the squash body from the branch's own
+#      commits, not the PR body — so relying on the PR body alone silently
+#      drops the trailer. Passing --body-file guarantees the merged commit
+#      matches exactly what was reviewed, independent of that repo setting:
+gh pr merge <pr> --repo me2resh/apexyard --squash \
+  --subject "release(#<ticket>): $VERSION" \
+  --body-file /tmp/release-pr-body.md
 
-# 9. After merge: CI auto-tags (auto-tag-on-release-pr-merge.yml)
+# 7b. Verify the trailer landed — do not skip, do not proceed to step 9 if empty:
+git fetch upstream main
+TRAILER=$(git log -1 --pretty=format:'%(trailers:key=Released-From,valueonly)' upstream/main)
+[ -n "$TRAILER" ] || { echo "ERROR: Released-From trailer missing on main." >&2; exit 1; }
+
+# 8. After merge: CI auto-tags (auto-tag-on-release-pr-merge.yml)
 #    If CI fails, tag manually:
 git fetch upstream main
 git tag "$VERSION" upstream/main
@@ -117,7 +166,7 @@ fi
 # Use --tags not the bare tag name (avoids branch-name validator hook misfiring)
 git push upstream --tags
 
-# 10. Run release-sync
+# 9. Run release-sync
 # /release-sync $VERSION
 ```
 
@@ -139,7 +188,7 @@ The `.github/workflows/auto-tag-on-release-pr-merge.yml` workflow fires when any
 - Uses `github.sha` (the squash commit SHA) — always the correct commit, never the release-branch HEAD (which was discarded by the squash)
 - Runs `git merge-base --is-ancestor <sha> main` before tagging
 - Tags and pushes with `git push origin --tags` (not the bare tag name — avoids the branch-name validator hook misfiring)
-- Creates a GitHub Release entry
+- Creates a GitHub Release entry in the same job (a tag pushed via GITHUB_TOKEN does not trigger a secondary release workflow — confirmed in apexyard-premium#326)
 
 This closes the v2.3.0 incident where the tag was placed on the release-branch HEAD rather than the squash commit.
 
@@ -192,7 +241,7 @@ Branch protection on `dev` matches the prior `main` setup — required reviews +
 ## Related
 
 - `AgDR-0007` — the original release-cut branch model decision record
-- `AgDR-0072` — the release-automation design record
+- `AgDR-0076` — the release-automation design record
 - `.claude/skills/release/SKILL.md` — the automated flow (this doc is the manual fallback)
 - `bin/release-changelog.sh` — the changelog generation helper
 - `.github/workflows/auto-tag-on-release-pr-merge.yml` — the auto-tag CI workflow

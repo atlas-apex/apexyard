@@ -3,7 +3,7 @@ name: auto-tag-on-release-pr-merge
 # Automatically tags the squash commit on main when a release PR merges,
 # and creates a GitHub Release entry from the PR body's changelog section.
 #
-# This workflow closes the post-merge-tagging gap described in AgDR-0072:
+# This workflow closes the post-merge-tagging gap described in AgDR-0076:
 # the v2.3.0 tag was mis-placed on the release-branch HEAD (not the squash
 # commit on main). By triggering on `pull_request` → `closed` after merge,
 # `github.sha` is already the squash commit on main — the exact commit to tag.
@@ -17,7 +17,11 @@ name: auto-tag-on-release-pr-merge
 #   - Manual dispatch (operator can re-run if something fails post-merge)
 #
 # Permissions:
-#   - contents: write (create tag + GitHub Release)
+#   - contents: write (create tag + GitHub Release) — granted at job level
+#     only (#819 / Scorecard Token-Permissions #58): the top-level block
+#     stays read-only because Scorecard's topLevelPermissions probe flags
+#     any write scope declared at workflow level, even when only one job
+#     exists and even when a job also scopes down.
 #
 # No new secrets required — uses the default GITHUB_TOKEN.
 
@@ -35,12 +39,14 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   auto-tag:
     name: tag release + create GitHub Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create tag (git push --tags) + gh release create
     # Only run on merged release PRs (not just any closed PR, and not on forks)
     if: |
       (
@@ -52,7 +58,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           # Checkout main so git commands work against the right branch
@@ -125,7 +131,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" "$SHA" -m "$VERSION"
           # Use --tags (not the bare tag name) to avoid branch-name validator
-          # hook misfiring on tag-push commands. See AgDR-0072 § auto-tag design.
+          # hook misfiring on tag-push commands. See AgDR-0076 § auto-tag design.
           git push origin --tags
           echo "Pushed tag $VERSION pointing at $SHA"
 

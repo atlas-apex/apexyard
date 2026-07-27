@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/release-changelog.sh — Generate a CHANGELOG section from git log between two refs.
 #
-# Used by the /release skill (AgDR-0072) to automate the changelog-generation
+# Used by the /release skill (AgDR-0076) to automate the changelog-generation
 # step. Emits markdown to stdout; never writes files (callers decide where to put it).
 #
 # Environment variables (all required):
@@ -58,8 +58,64 @@ REPO_REMOTE="${REPO_REMOTE:-upstream}"
 if [ "$PREV_TAG" = "NONE" ]; then
   LOG_RANGE="${HEAD_REF}"
 else
-  LOG_RANGE="${PREV_TAG}..${HEAD_REF}"
+  # AgDR-0094 (#872): prefer the RECORDED cut point over inferring one. Since
+  # the fix landed, `/release` writes a `Released-From: <dev-sha>` trailer into
+  # the release squash commit — that sha IS the exact dev tip the release was
+  # cut from, so TRAILER..HEAD_REF is deterministic and immune to both the
+  # #737 over-count and the #872 late-sync under-count (a late `/release-sync`
+  # merge can no longer mis-anchor the boundary, because we're not inferring
+  # it from sync-commit position anymore). Only look at PREV_TAG's own commit
+  # message — that's the squash commit the trailer was written into.
+  TRAILER_SHA=$(git log -1 --pretty=format:'%(trailers:key=Released-From,valueonly,separator=%x0A)' "$PREV_TAG" 2>/dev/null \
+                  | tail -n 1 | tr -d '[:space:]' || true)
+
+  if [ -n "$TRAILER_SHA" ] && git cat-file -e "${TRAILER_SHA}^{commit}" 2>/dev/null; then
+    LOG_RANGE="${TRAILER_SHA}..${HEAD_REF}"
+  else
+    # No trailer (pre-AgDR-0094 release, or a mangled/unknown sha) — fall back
+    # to the #737 sync-boundary heuristic below, unchanged.
+    #
+    # #737: PREV_TAG is a *squash* commit on main. Under the release-cut model
+    # the individual commits it squashed live on HEAD_REF (dev) but are NOT
+    # ancestors of the tag — so a naive PREV_TAG..HEAD_REF range (and even
+    # merge-base(PREV_TAG,dev)..dev) surfaces EVERY already-released commit,
+    # massively over-counting (v4.1.0 reported 102 feats / 263 commits for a
+    # ~1-feature delta). The correct start is the POST-SYNC BOUNDARY: after each
+    # release, `/release-sync` lands a "sync: merge main into dev after <ver>"
+    # commit (and its "...sync/main-to-dev-after-<ver>" PR merge) on dev. Commits
+    # AFTER the most recent such marker are exactly the unreleased delta.
+    # Patterns are VERSION-ANCHORED so they only match real sync commits, never a
+    # prose mention of the convention in some other commit body (e.g. this very
+    # fix's commit, or a doc PR) — an unanchored 'sync/main-to-dev-after' would
+    # let a later commit hijack the boundary and DROP unreleased work (#749 review).
+    #
+    # KNOWN LIMITATION this heuristic cannot fix (why AgDR-0094 exists): if the
+    # matching `/release-sync` merges LATE — landing near dev's tip, after many
+    # newer commits — this still anchors on that late marker and silently drops
+    # everything merged before it (#872). The trailer above is the real fix;
+    # this stays as the fallback for releases cut before it existed.
+    SYNC=$(git log "$HEAD_REF" --max-count=1 --pretty=format:'%H' \
+             --grep='^sync: merge main into dev after v[0-9]' \
+             --grep='sync/main-to-dev-after-v[0-9]' 2>/dev/null || true)
+    if [ -n "$SYNC" ]; then
+      LOG_RANGE="${SYNC}..${HEAD_REF}"
+    else
+      # No sync boundary on dev (first release under the model, or sync skipped):
+      # best available fallback is the merge-base, then the raw tag range.
+      BASE=$(git merge-base "$PREV_TAG" "$HEAD_REF" 2>/dev/null || true)
+      LOG_RANGE="${BASE:-$PREV_TAG}..${HEAD_REF}"
+    fi
+  fi
 fi
+
+# ── Expose the resolved range to the caller (#1002) ──────────────────────────
+# The /release skill's count-mismatch guard used to compare the changelog's
+# entry count against `git rev-list --count upstream/main..upstream/dev` —
+# structurally wrong under the release-cut squash model, where main..dev never
+# shrinks (see #1002). The guard should compare against the SAME range this
+# script actually generated the changelog from. Printed to stderr (not
+# stdout) so it never pollutes the changelog markdown callers capture.
+echo "RELEASE_CHANGELOG_RANGE=${LOG_RANGE}" >&2
 
 # ── Extract commits ──────────────────────────────────────────────────────────
 # Format: <short-sha> <subject>
@@ -175,8 +231,19 @@ desc_parts=()
 [ "${#changed_lines[@]}" -gt 0 ] && desc_parts+=("${#changed_lines[@]} improvement$([ "${#changed_lines[@]}" -gt 1 ] && echo 's' || echo '')")
 
 if [ "${#desc_parts[@]}" -gt 0 ]; then
-  IFS=', '; release_desc="$bump_type — ${desc_parts[*]}."
-  IFS=$' \t\n'
+  # NB: `${arr[*]}` only joins on the FIRST character of IFS, even when IFS is
+  # set to a multi-char string like ', ' — that dropped the space and produced
+  # "2 features,13 fixes,14 improvements." on the v5.2.0 cut (#1002). Join
+  # explicitly instead of relying on IFS-based array expansion.
+  joined=""
+  for part in "${desc_parts[@]}"; do
+    if [ -z "$joined" ]; then
+      joined="$part"
+    else
+      joined="$joined, $part"
+    fi
+  done
+  release_desc="$bump_type — ${joined}."
 else
   release_desc="$bump_type."
 fi

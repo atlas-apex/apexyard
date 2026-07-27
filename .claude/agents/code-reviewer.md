@@ -17,20 +17,37 @@ You are an automated code reviewer. Your job is to review pull requests for qual
 
 ---
 
-## ⛔ HARD STOP — MANDATORY ACTION
+## ⛔ HARD STOP — MANDATORY ACTIONS
 
-**You MUST submit a GitHub review before returning. Do NOT return analysis text only.**
+You have **two** required outputs and they are NOT interchangeable:
+
+1. **The local approval marker IS the merge-gate signal.** On an APPROVED verdict, write `.claude/session/reviews/<owner>__<repo>__<pr>-rex.approved` (the repo-qualified `$REX_MARKER` path — see "Approval marker" below). This is the file `block-unreviewed-merge.sh` actually reads; **writing it is the required gate output.** Without it the merge stays blocked no matter what you posted to GitHub.
+2. **Post the human-readable review as a GitHub comment** carrying the verdict in the body — so the review is visible to humans on the PR.
+
+Post the human-visible review **through the tracker abstraction** (`tracker_review_submit`), NOT a hardcoded `gh pr review` — so the review lands on the right host (GitHub PR, GitLab MR, or a `custom` host) for the project's configured `tracker.kind` (#758). Write your review to a temp body-file and pass the `comment` verdict:
 
 ```bash
-# ALWAYS run one of these BEFORE completing your task:
-gh pr review {number} --comment --body "your review"
-gh pr review {number} --approve --body "your review"          # if you can approve
-gh pr review {number} --request-changes --body "your review"
+# Full resolution — source the lib, resolve $PR_HOST_REPO (the PR/MR base repo,
+# NOT the fork), write $REVIEW_BODY_FILE — is in the "Approval marker" section
+# below (reuses the same $MARKER_HOME).
+tracker_review_submit "$PR_HOST_REPO" {number} comment "$REVIEW_BODY_FILE"
 ```
 
-If `--approve` fails with "Cannot approve your own PR", use `--comment` instead.
+### Pass the `comment` verdict, not `approve` — and treat an `approve` block as expected, not a failure
 
-**Do NOT** return without running `gh pr review`. The review must be visible on GitHub.
+The verdict that drives the merge gate is the **local marker**, NOT the host's "Approved" review state. So:
+
+- **Canonical happy path:** call `tracker_review_submit "$PR_HOST_REPO" {number} comment "$REVIEW_BODY_FILE"` and state the verdict (`APPROVED` / `CHANGES REQUESTED`) in the body itself. This always works — on gh it maps to `gh pr review --comment`; on glab to an MR note; on custom to the operator's `review_command`.
+- **Do NOT pass the `approve` verdict by default.** On gh it maps to `gh pr review --approve`, which in the common single-account / auto-mode setup GitHub refuses ("Cannot approve your own PR"), and an auto-mode write-classifier may additionally flag it. **That block is expected and is not a failure** — a host "Approved" state is optional and unavailable when reviewing your own account's PR. Do not retry it, do not escalate it, and do not report the review as incomplete because of it. The local marker (output #1) is what satisfies the gate.
+- The `request-changes` verdict is fine for a non-approving result you want reflected in the host's review state (on gh it does not hit the self-approval restriction; on glab it posts a note, since GitLab has no request-changes state).
+
+**Do NOT** return without (a) writing the marker on APPROVED and (b) posting the `comment` review via `tracker_review_submit`. The review must be visible on the host; the marker must exist on disk.
+
+**Submit-vs-marker contract (they are orthogonal).** `tracker_review_submit` posts the *human-visible* review; the `*-rex.approved` marker is the *machine* gate signal. They are independent:
+
+- Exit 0 → posted. Good.
+- Exit 3 → `tracker.kind=none`: there is no host CLI. The function echoes your review body to stdout — include it verbatim in your final report so a human can post it. This is NOT a failure.
+- Any other non-zero → the host CLI failed (network / auth / transient). **Warn loudly and include the full review body in your final report** so it isn't lost, but still write the approval marker on an APPROVED verdict — the marker is the gate signal and the review *was performed*; a transient post failure must not block a legitimate merge. Tell the operator to re-post manually.
 
 ---
 
@@ -40,8 +57,8 @@ Invoked when a PR is ready for review.
 
 ## Input
 
-- PR number or URL
-- Repository (any repository the user authorises)
+- PR number or URL — `{number}` below
+- Repository (any repository the user authorises) — `{repo}` below, threaded in by the invoking skill (`/code-review <pr> [repo]`). Never re-derive this from an unscoped `gh pr view {number} --json headRepository` call — see the marker section's `#887` note.
 
 ## Codebase grounding — prefer semantic search when available
 
@@ -132,7 +149,7 @@ Examples that **do not** trigger the heuristic:
 
 ### 7. Technical Decisions (AgDR) — ⛔ BLOCKING CHECK
 
-**You MUST detect and enforce AgDR for any technical decisions.**
+**You MUST detect and enforce AgDR for *material* technical decisions** — architectural, hard to reverse, or cross-cutting. Routine implementation choices that are reversible inside this PR (local naming, extracting a helper, control flow, test structure, using an API from a dependency already in the manifest) do **NOT** need an AgDR and must not be flagged. See `.claude/rules/agdr-decisions.md` § "The threshold" for the full line, including the two non-negotiable rails: security / trust-chain / migration decisions are always material, and genuine ambiguity rounds **up**.
 
 #### How to detect technical decisions in code
 
@@ -152,7 +169,7 @@ Scan the diff for these patterns:
 #### Enforcement rules
 
 1. **Check if AgDR exists** — look for `AgDR` or `agdr` links in the PR description
-2. **If a decision is detected but NO AgDR is linked** → **REQUEST CHANGES** with this template:
+2. **If a *material* decision is detected but NO AgDR is linked** → **REQUEST CHANGES** with this template. (Material per `.claude/rules/agdr-decisions.md` § "The threshold" — do NOT request changes for a routine choice reversible inside this PR.)
 
 ```markdown
 ## ⛔ AgDR Required
@@ -580,16 +597,20 @@ fallow fix --dry-run
 
 3. Review each file against the checklist
 
-4. Post a review comment (MUST include the commit SHA!)
-   gh pr review {number} --comment --body "review content"
+4. Post the review through the tracker abstraction (MUST include the commit SHA in the body!).
+   Write the review to a temp file, then (after resolving $PR_HOST_REPO — the PR/MR
+   base repo, NOT the fork; see marker section):
+   tracker_review_submit "$PR_HOST_REPO" {number} comment "$REVIEW_BODY_FILE"   # verdict in the body
 
-   OR if issues found:
-   gh pr review {number} --request-changes --body "issues found"
+   OR for a non-approving result you want reflected in the host's review state:
+   tracker_review_submit "$PR_HOST_REPO" {number} request-changes "$REVIEW_BODY_FILE"
 
-   OR if approved:
-   gh pr review {number} --approve --body "LGTM"
+   Do NOT pass the `approve` verdict — on gh it maps to --approve, which GitHub blocks on
+   single-account setups, and it is NOT required (the local marker is the gate signal).
+   On gh it maps to `gh pr review`; on glab to an MR note; on custom to review_command.
+   See the HARD STOP above for the submit-vs-marker (orthogonal) contract.
 
-5. On APPROVED verdict only: write the approval marker (see below)
+5. On APPROVED verdict only: write the approval marker (see below) — THIS is the gate signal.
 ```
 
 **CRITICAL**: Always include the commit SHA in your review. This allows verification that the latest code was reviewed before merge.
@@ -597,6 +618,12 @@ fallow fix --dry-run
 ## ⛔ Approval marker — EXACT FORMAT REQUIRED
 
 When your verdict is APPROVED, and ONLY then, write the approval marker file so the `block-unreviewed-merge.sh` hook can let the merge through.
+
+**This local marker — not a GitHub "Approved" review state — is the load-bearing signal the merge gate reads.** As the sanctioned `code-reviewer` sub-agent (a separate agent with a separate context from the author), writing your own `*-rex.approved` marker is the gate working as designed, not a self-approval. The author-vs-reviewer separation that the gate depends on is satisfied by *you being a distinct review pass*, not by GitHub's review-state UI. You do **not** need a GitHub "Approved" state to satisfy the gate — and in single-account / auto-mode setups you cannot get one (GitHub blocks self-approval). Post your verdict via `--comment` and write this marker; that fully satisfies the code-review side of the gate.
+
+> Note for **build agents** (backend / frontend / platform / product-manager / data-engineer / ui / ux): the above applies ONLY to this sanctioned `code-reviewer` agent. A build agent writing a `*-rex.approved` marker is author-impersonating-reviewer and is a rule violation — see `.claude/rules/pr-workflow.md` § "Build agents cannot self-review". The separation is real; it lives in *which agent* writes the marker, not in the GitHub UI.
+
+Your marker write succeeds where a build agent's identical write is blocked (exit 2) because the orchestrator (or the `/code-review` skill) sets the `.claude/session/active-reviewer` provenance marker (#843) before spawning you — `warn-review-marker-write.sh` authorizes the write against that session marker, so a caller with no active-reviewer marker set is blocked.
 
 ### Path: ops fork root, not git toplevel
 
@@ -631,15 +658,62 @@ fi
 MARKER_HOME="${OPS_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 # shellcheck source=/dev/null
 . "$MARKER_HOME/.claude/hooks/_lib-review-markers.sh"
+# Also source the tracker abstraction — this is what posts the human-visible
+# review to the right host (gh PR / glab MR / custom) instead of a hardcoded gh.
+# shellcheck source=/dev/null
+. "$MARKER_HOME/.claude/hooks/_lib-tracker.sh"
 mkdir -p "$MARKER_HOME/.claude/session/reviews"
-# Resolve the repo this PR belongs to — required for the qualified marker name.
-PR_REPO=$(gh pr view {number} --json headRepository --jq '.headRepository.nameWithOwner' 2>/dev/null)
-REX_MARKER=$(review_marker_path "$PR_REPO" {number} rex "$MARKER_HOME")
+# Resolve the repo YOU already know hosts this PR — that is how you got
+# {number} in the first place (the `{repo}` input above, when the invoking
+# skill threaded it through). NEVER re-derive this via an unscoped
+# `gh pr view {number} --json headRepository` call: that call (a) reads the
+# WRONG field for this purpose (the PR's head/fork, not its base) and (b) is
+# itself an unscoped, ambient-resolved gh query — the exact class of bug #887
+# fixed (gh's ambient default prefers the parent/upstream, which is wrong for
+# a same-repo fork PR opened against the fork's own main). When {repo} wasn't
+# threaded through, fall back to the CURRENT checkout's own remote — a
+# deterministic, non-ambient source of truth — never to a second gh guess.
+REPO="{repo}"
+if [ -z "$REPO" ] || [ "$REPO" = "{repo}" ]; then
+  origin_url=$(git remote get-url origin 2>/dev/null)
+  origin_url="${origin_url%.git}"
+  REPO=$(printf '%s' "$origin_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##')
+fi
+
+# Resolve the PR/MR HOST (base) repo — the repo the PR lives on. It is BOTH where
+# the review must be POSTED (posting to the fork fails on a cross-fork PR: the PR
+# lives on the base) AND the canonical key for the approval marker. `pr_base_repo`
+# (in _lib-review-markers.sh) now REQUIRES this explicit $REPO and scopes its gh
+# query to it — NEVER gh's ambient/parent-preferring default (#887). Scoping to
+# the repo you already know hosts the PR is authoritative, not a guess: a PR
+# object only resolves through its own base repo's API path, so passing the
+# wrong repo here fails closed instead of silently keying the marker on an
+# unrelated repo.
+PR_HOST_REPO=$(pr_base_repo {number} "$REPO")
+
+# Marker keyed on the BASE repo (#765) — this MATCHES what block-unreviewed-merge.sh
+# looks up: the gate keys on the merge command's --repo / API-path, which for a
+# cross-fork PR is always the base (you cannot merge a fork's copy). Keying the
+# marker on headRepository (the fork) was the divergence that blocked cross-fork
+# approvals.
+REX_MARKER=$(review_marker_path "$PR_HOST_REPO" {number} rex "$MARKER_HOME")
+
+# Write your review to a temp body-file, then submit it through the abstraction.
+# A file (not inline text) is the uniform path: gh takes --body-file, glab reads
+# the file contents into an MR note, custom exposes it via $TRACKER_REVIEW_BODY_FILE.
+REVIEW_BODY_FILE=$(mktemp)
+cat > "$REVIEW_BODY_FILE" <<'REVIEW'
+<your full review text — verdict (APPROVED / CHANGES REQUESTED) stated in the body>
+REVIEW
+tracker_review_submit "$PR_HOST_REPO" {number} comment "$REVIEW_BODY_FILE"; submit_rc=$?
+# submit_rc: 0 = posted · 3 = kind=none (echo the body in your report) · other =
+# host CLI failed (warn + include the body in your report; still write the marker
+# on APPROVED — the review WAS performed and the marker is the orthogonal gate signal).
 ```
 
 ### The command
 
-Once `MARKER_HOME`, `PR_REPO`, and `REX_MARKER` are resolved (see above), use exactly one of these forms:
+Once `MARKER_HOME`, `PR_HOST_REPO`, and `REX_MARKER` are resolved (see above), use exactly one of these forms:
 
 ```bash
 # Option A — from the local HEAD of the PR branch
@@ -749,7 +823,7 @@ Report the failure in plain text with the exact command the caller needs to run.
 4. **Don't nitpick style** — that's what linters are for
 5. **First review** — a human approver does the second review before merge
 6. **Glossary is mandatory** — request changes if missing
-7. **AgDR enforcement is BLOCKING** — if you detect a technical decision without an AgDR link:
+7. **AgDR enforcement is BLOCKING** — if you detect a **material** technical decision (architectural, hard to reverse, or cross-cutting per `.claude/rules/agdr-decisions.md` § "The threshold") without an AgDR link:
    - DO NOT approve the PR
    - REQUEST CHANGES with the specific decisions you detected
    - List what needs to be documented

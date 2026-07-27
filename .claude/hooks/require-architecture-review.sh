@@ -39,39 +39,116 @@
 # existence. For adversarial trust, use CODEOWNERS.
 
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
-
-if [ -z "$COMMAND" ]; then
-  exit 0
-fi
 
 # Shared merge-shape detector + PR-number parser (see _lib-extract-pr.sh).
 # Handles `gh pr merge <N>` and `gh api repos/<owner>/<repo>/pulls/<N>/merge`.
+# Sourced BEFORE the jq-based command parse below (moved up from its
+# original position after the parse) so is_merge_command is available as
+# the jq-independent fallback detector when the parse can't be trusted —
+# see #965.
 . "$(dirname "$0")/_lib-extract-pr.sh"
 # Repo-qualified marker path helper (#485).
 . "$(dirname "$0")/_lib-review-markers.sh"
+# cd-target → origin recovery for the no---repo split-portfolio merge (#687).
+. "$(dirname "$0")/_lib-pr-repo.sh"
+
+# Parse .tool_input.command via jq. #965: this used to be the ONLY parse
+# path, and an empty/failed result — jq missing from PATH, or jq erroring
+# on unexpected input — fell straight through to `exit 0`, silently
+# ALLOWING the merge command through with NO architecture-review check at
+# all. A gate must fail CLOSED when it can't evaluate its own
+# precondition, not fail open.
+#
+# But this hook's PreToolUse matcher is `Bash` (every Bash call this
+# session runs, not just merges — see .claude/settings.json), so the fix
+# can't be "exit 2 whenever jq is unavailable": that would block every
+# unrelated Bash command for the rest of the session the moment jq broke,
+# which is worse than the bug it replaces. The resolution below keeps the
+# jq-unparseable case a no-op EXCEPT when the raw payload text itself
+# looks merge-shaped — in that narrower case we cannot safely let the
+# command through, so we fail closed instead.
+COMMAND=""
+if command -v jq >/dev/null 2>&1; then
+  COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
+fi
+
+if [ -z "$COMMAND" ]; then
+  # jq is missing, OR jq is present but the parse produced nothing — a
+  # genuinely empty command (legitimate no-op) or jq choking on
+  # malformed/unexpected JSON. Those two cases are indistinguishable from
+  # a parsed field alone, so fall back to a parser-independent scan: reuse
+  # is_merge_command (plain grep/sed, no jq dependency) directly against
+  # the RAW JSON payload text instead of the parsed command. The command
+  # text's own words (`gh`, `pr`, `merge`, digits, spaces) survive JSON
+  # string-encoding unchanged, so this is the exact same tested
+  # merge-shape detector used below — not a second, drift-prone regex.
+  #
+  # #973: the command's SEPARATORS do not always survive unchanged — a
+  # literal tab (or other JSON-escaped whitespace) encodes as a
+  # multi-character escape sequence (`\t`, `\uXXXX`) that `is_merge_command`'s
+  # `\s+` regex class won't recognise as whitespace. Normalize the small set
+  # of escapes that matter BEFORE scanning, so a merge command with
+  # JSON-escaped separators is caught exactly like a space-separated one —
+  # see `_normalize_json_escapes` in _lib-extract-pr.sh for the decode and
+  # why it's only ever applied on this raw-payload path, never on COMMAND.
+  #
+  # A payload that isn't merge-shaped at all is a genuine no-op — exit 0,
+  # unchanged behaviour for the overwhelming majority of Bash calls this
+  # hook sees. A payload that DOES look merge-shaped but that we can't
+  # safely parse/verify fails CLOSED (exit 2) instead of silently letting
+  # an unreviewed design artifact through.
+  if is_merge_command "$(_normalize_json_escapes "$INPUT")"; then
+    echo "BLOCKED: architecture-review gate cannot evaluate this command — jq is unavailable or .tool_input.command could not be parsed, but the raw input looks merge-related. Refusing to merge until this can be verified. Restore jq (see .claude/hooks/check-jq-installed.sh) and retry." >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 if ! is_merge_command "$COMMAND"; then
   exit 0
 fi
 
-# Parse --repo (for `gh pr merge --repo owner/repo`). Fallback: recover from
-# the `gh api .../pulls/<N>/merge` URL path so downstream `gh pr diff` calls
-# still know which repo to talk to.
+# Resolve the PR's repo. Each step runs only if the prior left CMD_REPO empty:
+#   1. --repo flag      (`gh pr merge --repo owner/repo`)
+#   2. gh api URL path  (`gh api repos/<owner>/<repo>/pulls/<N>/merge`)
+#   3. cd-target origin (`cd <portfolio> && gh pr merge <N>` with NO --repo —
+#                        the split-portfolio v2 pattern; the hook fires BEFORE
+#                        the in-command `cd`, so its own cwd is the ops fork,
+#                        not the PR's repo. me2resh/apexyard#687, the merge-time
+#                        sibling of the create-time fix #669.)
+#   4. extract_repo_from_command fallback (current-branch `gh pr view`)
 CMD_REPO=$(echo "$COMMAND" | sed -nE 's/.*--repo[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)
 if [ -z "$CMD_REPO" ]; then
   CMD_REPO=$(echo "$COMMAND" | grep -oE 'repos/[^/[:space:]]+/[^/[:space:]]+/pulls/[0-9]+/merge' | sed -nE 's|repos/([^/]+/[^/]+)/pulls/.*|\1|p' | head -1)
 fi
-REPO_FLAG=""
-if [ -n "$CMD_REPO" ]; then
-  REPO_FLAG="--repo $CMD_REPO"
+if [ -z "$CMD_REPO" ]; then
+  # Recover the repo from a leading `cd <path> &&` prefix — only when the path
+  # resolves to a real git tree (relative paths resolve against the hook's cwd,
+  # which is correct: the hook runs pre-`cd`). Otherwise fall through.
+  CD_TARGET=$(pr_cmd_cd_target "$COMMAND")
+  if [ -n "$CD_TARGET" ] && git -C "$CD_TARGET" rev-parse --git-dir >/dev/null 2>&1; then
+    CMD_REPO=$(git_origin_repo "$CD_TARGET")
+  fi
 fi
 
 PR_NUMBER=$(extract_pr_number "$COMMAND")
 # Resolve the repo for qualified marker paths (#485).
-# CMD_REPO already parsed above; fall back via helper if blank.
+# CMD_REPO already resolved above; fall back via helper if still blank.
+# NOTE (#765): the architecture marker is keyed on the BASE repo. CMD_REPO is the base via
+# --repo / API-path / cd-target origin; the extract_repo_from_command fallback below resolves
+# headRepository (the FORK) on a no---repo current-branch merge — a residual edge affecting
+# unsanctioned merges only (/design-review + /approve-architecture thread the base repo). Left as-is.
 if [ -z "$CMD_REPO" ]; then
   CMD_REPO=$(extract_repo_from_command "$COMMAND")
+fi
+
+# Derive REPO_FLAG from the FULLY-resolved CMD_REPO (#687) so the `gh pr diff`
+# below targets the PR's real repo. If this were set before the cd-target /
+# fallback steps, the no---repo split-portfolio case would diff the ops fork,
+# find no design artifact, and silently bypass the gate.
+REPO_FLAG=""
+if [ -n "$CMD_REPO" ]; then
+  REPO_FLAG="--repo $CMD_REPO"
 fi
 
 if [ -z "$PR_NUMBER" ]; then

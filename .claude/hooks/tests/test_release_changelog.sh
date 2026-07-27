@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bin/release-changelog.sh (AgDR-0072).
+# Tests for bin/release-changelog.sh (AgDR-0076).
 #
 # Strategy: create a temporary git repo with fake commits, then call the
 # script against that repo and assert on the stdout output. No network
@@ -204,11 +204,15 @@ contains "feat from beginning" "initial feature" "$out"
 # ── Test: sync and release commits are excluded ──────────────────────────────
 
 echo "--- excluded commit types ---"
+# Ordering mirrors the real release-cut workflow (#737): the sync marker lands
+# FIRST (reconciling the prior release), THEN the new feat for this release, then
+# the release commit. The post-sync-boundary range therefore includes the feat
+# (unreleased) and excludes the sync (it's the boundary) and the release commit.
 out=$(run_test '
   mc "chore: initial"
   git tag v5.0.0
-  mc "feat(#600): real feature"
   mc "sync: merge main into dev after v5.0.0 release"
+  mc "feat(#600): real feature"
   mc "release(#601): v5.1.0"
   PREV_TAG="v5.0.0" HEAD_REF="HEAD" VERSION="v5.1.0" DATE="2026-06-21" \
     bash "'"$CHANGELOG_SCRIPT"'" 2>&1
@@ -230,6 +234,163 @@ out=$(run_test '
 ')
 contains "feat included" "add something" "$out"
 not_contains "branch merge excluded" "Merge branch main" "$out"
+
+# ── Test: #737 post-sync boundary — released commits after the tag excluded ──
+# Squash-model simulation: the tag sits early; "released" commits follow it on
+# dev (they were squashed into the tag on main, so a tag-range over-counts them);
+# a `/release-sync` marker commit lands; then the true unreleased delta. The fix
+# must anchor on the sync marker, NOT the tag — so only the post-sync feat shows.
+echo "--- #737 post-sync boundary ---"
+out=$(run_test '
+  mc "chore: initial"
+  git tag v7.0.0
+  mc "feat(#710): already-released work one"
+  mc "feat(#711): already-released work two"
+  mc "sync: merge main into dev after v7.0.0 release"
+  mc "feat(#712): the real unreleased delta"
+  PREV_TAG="v7.0.0" HEAD_REF="HEAD" VERSION="v7.1.0" DATE="2026-06-28" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+')
+contains   "post-sync delta included"       "the real unreleased delta" "$out"
+not_contains "pre-sync released work excluded (1)" "already-released work one" "$out"
+not_contains "pre-sync released work excluded (2)" "already-released work two" "$out"
+
+# ── Test: #737 fallback — no sync marker → merge-base/tag range still works ───
+echo "--- #737 fallback (no sync marker) ---"
+out=$(run_test '
+  mc "chore: initial"
+  git tag v8.0.0
+  mc "feat(#810): first feature since tag"
+  PREV_TAG="v8.0.0" HEAD_REF="HEAD" VERSION="v8.1.0" DATE="2026-06-28" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+')
+contains "fallback still lists the delta" "first feature since tag" "$out"
+
+# ── Test: #737 grep is version-anchored — a prose mention can't hijack the boundary ──
+# A commit AFTER the real sync whose subject merely mentions the convention must
+# NOT be treated as the boundary. With an unanchored grep it would win
+# --max-count=1, set LOG_RANGE=<that>..HEAD, and drop the unreleased delta.
+echo "--- #737 version-anchored grep (no prose false-positive) ---"
+out=$(run_test '
+  mc "chore: initial"
+  git tag v9.0.0
+  mc "sync: merge main into dev after v9.0.0 release"
+  mc "feat(#900): document the sync/main-to-dev-after convention"
+  PREV_TAG="v9.0.0" HEAD_REF="HEAD" VERSION="v9.1.0" DATE="2026-06-28" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+')
+contains "feat mentioning the unversioned string still included" "document the sync/main-to-dev-after convention" "$out"
+
+# ── Test: AgDR-0094 (#872) — Released-From trailer wins over the sync heuristic ──
+# The v5.0.0 regression case: the prior release-sync PR merged LATE, landing near
+# HEAD after real unreleased work. With no trailer, the #737 heuristic anchors on
+# that late sync marker and silently drops everything before it. With the trailer
+# present on PREV_TAG's own commit, the range anchors on the RECORDED cut sha
+# instead — deterministic, and immune to where the sync marker happens to land.
+echo "--- AgDR-0094 trailer wins over late sync (v5.0.0 regression) ---"
+out=$(run_test '
+  mc "chore: initial"
+  CUT=$(git rev-parse HEAD)
+  git commit -q --allow-empty -m "chore: release v10.0.0" -m "Released-From: $CUT"
+  git tag v10.0.0
+  mc "feat(#1001): pre-sync unreleased feature one"
+  mc "feat(#1002): pre-sync unreleased feature two"
+  mc "sync: merge main into dev after v10.0.0 release"
+  mc "feat(#1003): post-sync unreleased feature"
+  PREV_TAG="v10.0.0" HEAD_REF="HEAD" VERSION="v10.1.0" DATE="2026-07-10" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+')
+contains "pre-sync feature one included (the under-count fix)" "pre-sync unreleased feature one" "$out"
+contains "pre-sync feature two included (the under-count fix)" "pre-sync unreleased feature two" "$out"
+contains "post-sync feature still included" "post-sync unreleased feature" "$out"
+not_contains "release commit itself excluded" "chore: release v10.0.0" "$out"
+not_contains "sync commit itself excluded" "merge main into dev after v10.0.0" "$out"
+
+# ── Test: AgDR-0094 — trailer-absent releases keep the old #737 fallback ────────
+# PREV_TAG carries no trailer (a pre-AgDR-0094 release, or any plain tag) — the
+# range must fall back to the existing sync-boundary heuristic unchanged. This
+# is the explicit trailer-absent counterpart to the trailer-present test above;
+# every pre-existing #737 case elsewhere in this file is a trailer-absent case
+# too, so this one exists mainly to name the fallback path directly.
+echo "--- AgDR-0094 trailer-absent falls back to #737 heuristic ---"
+out=$(run_test '
+  mc "chore: initial"
+  git tag v11.0.0
+  mc "feat(#1101): already-released work"
+  mc "sync: merge main into dev after v11.0.0 release"
+  mc "feat(#1102): the real unreleased delta"
+  PREV_TAG="v11.0.0" HEAD_REF="HEAD" VERSION="v11.1.0" DATE="2026-07-10" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+')
+contains "post-sync delta included (unchanged #737 behaviour)" "the real unreleased delta" "$out"
+not_contains "pre-sync work still excluded (unchanged #737 behaviour)" "already-released work" "$out"
+
+# ── Test: AgDR-0094 — a bogus/unknown trailer sha falls back safely, never errors ──
+# A mangled or stale Released-From trailer (sha doesn't resolve to a commit in
+# this repo) must not crash the script — it should fall back to the #737
+# heuristic exactly as if no trailer existed, and exit 0.
+echo "--- AgDR-0094 bogus trailer sha falls back safely ---"
+out=$(run_test '
+  mc "chore: initial"
+  git commit -q --allow-empty -m "chore: release v12.0.0" -m "Released-From: not-a-real-sha"
+  git tag v12.0.0
+  mc "feat(#1201): unreleased work before late sync"
+  mc "sync: merge main into dev after v12.0.0 release"
+  mc "feat(#1202): unreleased work after late sync"
+  PREV_TAG="v12.0.0" HEAD_REF="HEAD" VERSION="v12.1.0" DATE="2026-07-10" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+  echo "EXIT_CODE=$?"
+')
+contains "script exits cleanly despite the bogus sha" "EXIT_CODE=0" "$out"
+contains "falls back to sync heuristic (post-sync work included)" "unreleased work after late sync" "$out"
+not_contains "falls back to sync heuristic (pre-sync work excluded, same as #737 fallback)" "unreleased work before late sync" "$out"
+
+# ── Test: #1002 — release_desc join has a space after every comma ───────────
+# Regression test for the v5.2.0 cut's "2 features,13 fixes,14 improvements."
+# (no space after the commas) — `${arr[*]}` with IFS=', ' only joins on the
+# first IFS char, silently dropping the space.
+echo "--- #1002 release_desc comma spacing ---"
+out=$(run_test '
+  mc "chore: initial"
+  git tag v13.0.0
+  mc "feat(#1301): first feature"
+  mc "feat(#1302): second feature"
+  mc "fix(#1303): first fix"
+  mc "chore(#1304): first chore"
+  PREV_TAG="v13.0.0" HEAD_REF="HEAD" VERSION="v13.1.0" DATE="2026-07-24" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>&1
+')
+contains "space after first comma" "2 features, 1 fix" "$out"
+contains "space after second comma" "1 fix, 1 improvement" "$out"
+not_contains "no unspaced comma before 'fix'" "features,1" "$out"
+not_contains "no unspaced comma before 'improvement'" "fix,1" "$out"
+
+# ── Test: #1002 — RELEASE_CHANGELOG_RANGE is printed to stderr, not stdout ──
+# The /release skill's count-mismatch guard needs the exact range the script
+# resolved (trailer-anchored or #737-fallback) to compare against, instead of
+# the structurally-wrong `main..dev` (#1002). Verify it is emitted on stderr
+# (so it never pollutes the changelog markdown on stdout) and matches the
+# trailer-anchored range when a trailer is present.
+echo "--- #1002 RELEASE_CHANGELOG_RANGE on stderr ---"
+stderr_capture=$(mktemp)
+out=$(run_test '
+  mc "chore: initial"
+  CUT=$(git rev-parse HEAD)
+  git commit -q --allow-empty -m "chore: release v14.0.0" -m "Released-From: $CUT"
+  git tag v14.0.0
+  mc "feat(#1401): unreleased feature"
+  stdout_out=$(PREV_TAG="v14.0.0" HEAD_REF="HEAD" VERSION="v14.1.0" DATE="2026-07-24" \
+    bash "'"$CHANGELOG_SCRIPT"'" 2>"'"$stderr_capture"'")
+  echo "STDOUT_HAS_RANGE_LINE=$(echo "$stdout_out" | grep -c "RELEASE_CHANGELOG_RANGE=" || true)"
+  echo "EXPECT_SHA=$CUT"
+')
+stderr_out=$(cat "$stderr_capture")
+rm -f "$stderr_capture"
+contains "range line NOT on stdout" "STDOUT_HAS_RANGE_LINE=0" "$out"
+contains "range line present on stderr" "RELEASE_CHANGELOG_RANGE=" "$stderr_out"
+# Cross-check the printed range is anchored on the trailer sha, not main..dev.
+expect_sha=$(echo "$out" | grep -oE 'EXPECT_SHA=.*' | cut -d= -f2)
+contains "stderr range is anchored on the trailer sha" "RELEASE_CHANGELOG_RANGE=${expect_sha}..HEAD" "$stderr_out"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

@@ -1,9 +1,12 @@
 #!/bin/bash
-# PreToolUse hook on `gh pr merge` AND `gh api .../pulls/<N>/merge`: blocks the
-# merge if any required CI check is failing, pending, or cancelled.
+# PreToolUse hook on `gh pr merge` / `gh api .../pulls/<N>/merge` AND their
+# GitLab counterparts `glab mr merge` / `glab api .../merge_requests/<N>/merge`:
+# blocks the merge if CI is failing, pending, or unresolvable.
 #
-# Both merge shapes are covered — see _lib-extract-pr.sh for the parser and
-# #47 for why the API-shape bypass was a gap worth closing.
+# All four merge shapes are covered — see _lib-extract-pr.sh for the parser.
+# #47 is why the gh-api-shape bypass was worth closing; #764/#767 added the
+# glab shapes to the OTHER three merge gates; this hook was the one sibling
+# still hardcoded to `gh pr checks` (#790 — the last non-forge-aware gate).
 #
 # Enforces .claude/rules/pr-quality.md § "No Red CI Before Merge" —
 # "Never merge with red CI - even if the failure is pre-existing or
@@ -11,6 +14,8 @@
 # the PR so all checks are green, and only then merge." Was prose-only
 # until this hook shipped.
 #
+# GH PATH (unchanged, byte-identical to pre-#790 behaviour)
+# -----------------------------------------------------------
 # Uses `gh pr checks <pr>` which returns one line per check with status.
 # Exit codes:
 #   0 = all checks passed (and none required are missing)
@@ -26,17 +31,81 @@
 #
 # Pending checks (IN_PROGRESS | QUEUED): BLOCKED. The rule says all checks
 # must be green; pending is not green. Wait for CI to finish, then retry.
+#
+# GLAB PATH (new, #790)
+# ----------------------
+# `resolve_ci_status_glab` (see _lib-extract-pr.sh) resolves the GitLab MR's
+# head-pipeline status via `glab mr view <iid> --output json`, normalised to
+# one of: success | pending | failure | none | "" (unresolvable).
+#   Allows: "success"; "none" (MR has no pipeline configured — the glab
+#   analog of gh's "no checks reported").
+#   Blocks: "pending"; "failure"; "" — an EMPTY status means the pipeline
+#   state could not be determined (glab missing, network/auth failure,
+#   unparseable response). Fail CLOSED: an unresolvable status is never
+#   treated as green, exactly like a red-or-unfetchable gh CI check.
 
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
-
-if [ -z "$COMMAND" ]; then
-  exit 0
-fi
 
 # Shared merge-shape detector + PR-number parser (see _lib-extract-pr.sh).
-# Handles `gh pr merge <N>` and `gh api repos/<owner>/<repo>/pulls/<N>/merge`.
+# Handles `gh pr merge <N>`, `gh api repos/<owner>/<repo>/pulls/<N>/merge`,
+# `glab mr merge <N>`, and `glab api .../merge_requests/<N>/merge` (#764/#767).
+# Sourced BEFORE the jq-based command parse below (moved up from its
+# original position after the parse) so is_merge_command is available as
+# the jq-independent fallback detector when the parse can't be trusted —
+# see #965.
 . "$(dirname "$0")/_lib-extract-pr.sh"
+
+# Parse .tool_input.command via jq. #965: this used to be the ONLY parse
+# path, and an empty/failed result — jq missing from PATH, or jq erroring
+# on unexpected input — fell straight through to `exit 0`, silently
+# ALLOWING the merge command through with NO CI-status check at all. A
+# security/quality gate must fail CLOSED when it can't evaluate its own
+# precondition, not fail open.
+#
+# But this hook's PreToolUse matcher is `Bash` (every Bash call this
+# session runs, not just merges — see .claude/settings.json), so the fix
+# can't be "exit 2 whenever jq is unavailable": that would block every
+# unrelated Bash command for the rest of the session the moment jq broke,
+# which is worse than the bug it replaces. The resolution below keeps the
+# jq-unparseable case a no-op EXCEPT when the raw payload text itself
+# looks merge-shaped — in that narrower case we cannot safely let the
+# command through, so we fail closed instead.
+COMMAND=""
+if command -v jq >/dev/null 2>&1; then
+  COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
+fi
+
+if [ -z "$COMMAND" ]; then
+  # jq is missing, OR jq is present but the parse produced nothing — a
+  # genuinely empty command (legitimate no-op) or jq choking on
+  # malformed/unexpected JSON. Those two cases are indistinguishable from
+  # a parsed field alone, so fall back to a parser-independent scan: reuse
+  # is_merge_command (plain grep/sed, no jq dependency) directly against
+  # the RAW JSON payload text instead of the parsed command. The command
+  # text's own words (`gh`, `pr`, `merge`, digits, spaces) survive JSON
+  # string-encoding unchanged, so this is the exact same tested
+  # merge-shape detector used below — not a second, drift-prone regex.
+  #
+  # #973: the command's SEPARATORS do not always survive unchanged — a
+  # literal tab (or other JSON-escaped whitespace) encodes as a
+  # multi-character escape sequence (`\t`, `\uXXXX`) that `is_merge_command`'s
+  # `\s+` regex class won't recognise as whitespace. Normalize the small set
+  # of escapes that matter BEFORE scanning, so a merge command with
+  # JSON-escaped separators is caught exactly like a space-separated one —
+  # see `_normalize_json_escapes` in _lib-extract-pr.sh for the decode and
+  # why it's only ever applied on this raw-payload path, never on COMMAND.
+  #
+  # A payload that isn't merge-shaped at all is a genuine no-op — exit 0,
+  # unchanged behaviour for the overwhelming majority of Bash calls this
+  # hook sees. A payload that DOES look merge-shaped but that we can't
+  # safely parse/verify fails CLOSED (exit 2) instead of silently letting
+  # an ungated merge through with an unverified CI status.
+  if is_merge_command "$(_normalize_json_escapes "$INPUT")"; then
+    echo "BLOCKED: CI gate cannot evaluate this command — jq is unavailable or .tool_input.command could not be parsed, but the raw input looks merge-related. Refusing to merge until CI status can be verified. Restore jq (see .claude/hooks/check-jq-installed.sh) and retry." >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 if ! is_merge_command "$COMMAND"; then
   exit 0
@@ -52,19 +121,22 @@ if merge_command_uses_variable "$COMMAND"; then
 BLOCKED: cannot verify CI on a variable-substituted merge command.
 
 This gate reads the literal command text and can't resolve shell variables
-(e.g. `gh pr merge $PR --repo $REPO`) to the real PR / repo, so it cannot
-check the correct PR's CI status. Re-run with literal values:
+(e.g. `gh pr merge $PR --repo $REPO` or `glab mr merge $MR -R $REPO`) to the
+real PR/MR or repo, so it cannot check the correct one's CI status. Re-run
+with literal values:
 
   gh pr merge <number> --repo <owner>/<repo> --squash
+  glab mr merge <iid> -R <owner>/<repo>
 
-(Use the actual PR number and owner/repo — not shell variables.)
+(Use the actual PR/MR number and owner/repo — not shell variables.)
 EOF
   exit 2
 fi
 
-# Parse --repo (for `gh pr merge --repo owner/repo`). Uses the shared extractor,
-# which also recovers the repo from a `gh api .../pulls/<N>/merge` URL path so
-# `gh pr checks` below is still scoped correctly.
+# Parse --repo / -R (for `gh pr merge --repo owner/repo` or `glab mr merge -R
+# owner/repo`). Uses the shared extractor, which also recovers the repo from a
+# `gh api .../pulls/<N>/merge` or `glab api .../merge_requests/<N>/merge` URL
+# path so the CI-status check below is still scoped correctly.
 CMD_REPO=$(extract_repo_from_command "$COMMAND")
 REPO_FLAG=""
 if [ -n "$CMD_REPO" ]; then
@@ -78,6 +150,74 @@ if [ -z "$PR_NUMBER" ]; then
   exit 0
 fi
 
+# Forge dispatch (#790): the command text normally says which CLI it drives —
+# the same detector _lib-extract-pr.sh's own resolvers use internally. The
+# `tracker_pr_merge` wrapper (#759) is the one shape where that's NOT true by
+# design — the wrapper's whole point is that its OWN text never says "gh" or
+# "glab" (that choice lives in the registry, resolved at call time via
+# `tracker_kind`). Text-based `_forge_from_command` would silently default to
+# "gh" for a glab-kind project calling the wrapper, so for that shape ONLY,
+# dispatch via the registry (`_forge_kind_for`, the same resolver
+# resolve_pr_head/resolve_pr_head_branch already use) instead. Every other
+# shape (explicit `gh pr merge` / `gh api` / `glab mr merge` / `glab api`)
+# keeps the original text-based dispatch unchanged — this preserves the
+# existing #790 test behaviour exactly.
+if echo "$COMMAND" | grep -qE '\btracker_pr_merge\b'; then
+  FORGE=$(_forge_kind_for "$CMD_REPO")
+else
+  FORGE=$(_forge_from_command "$COMMAND")
+fi
+if [ "$FORGE" = "glab" ]; then
+  # --- GitLab path ---
+  PIPELINE_STATUS=$(resolve_ci_status_glab "$PR_NUMBER" "$CMD_REPO")
+
+  case "$PIPELINE_STATUS" in
+    success)
+      exit 0
+      ;;
+    none)
+      echo "NOTE: MR !${PR_NUMBER} has no pipeline configured. Merge-on-red-CI gate is a no-op for this MR." >&2
+      exit 0
+      ;;
+    *)
+      # pending | failure | "" (unresolvable) — all three BLOCK. An empty
+      # status must never be treated as green: if glab is missing, the
+      # network/auth failed, or the response was unparseable, that is a
+      # reason to block, not a reason to guess "probably fine".
+      STATUS_DESC="${PIPELINE_STATUS:-unresolvable (glab CLI missing, network/auth failure, or unparseable response)}"
+      cat >&2 <<MSG
+BLOCKED: MR !${PR_NUMBER} has red or unresolvable CI. Cannot merge.
+
+\`glab mr view ${PR_NUMBER}\` reports pipeline status: ${STATUS_DESC}
+
+ApexYard rule (.claude/rules/pr-quality.md § "No Red CI Before Merge"):
+
+  "Never merge with red CI — even if the failure is pre-existing or
+  unrelated. Fix the pre-existing issue first (separate commit), rebase
+  the PR so all checks are green, and only then merge."
+
+To unblock:
+
+  1. Look at the pipeline: \`glab mr view ${PR_NUMBER} --web\` or
+     \`glab ci status\` on the MR's source branch
+  2. If the failure is in YOUR change, fix it and push
+  3. If the failure is PRE-EXISTING (pipeline was already red on the target
+     branch), fix the pre-existing issue in a separate commit, then retry
+  4. If the pipeline is PENDING, wait for it to finish, then retry
+  5. If the status could not be fetched at all, check glab auth/network and
+     retry — this gate fails CLOSED on an unresolvable status
+  6. Re-invoke Rex after any new commit (re-review required)
+  7. Retry \`glab mr merge ${PR_NUMBER}\`
+
+No exceptions. Not even for "unrelated" failures. Red or unresolvable CI
+stays blocking until someone fixes it — that's the whole point of the rule.
+MSG
+      exit 2
+      ;;
+  esac
+fi
+
+# --- GitHub path (unchanged, byte-identical to pre-#790 behaviour) ---
 # Query checks. gh pr checks returns text output; we check both the exit code
 # and a "no checks reported" substring — the latter is how gh reports the
 # genuinely-unchecked case regardless of exit code version.

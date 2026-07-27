@@ -60,6 +60,8 @@ Also check before pushing:
 
 NO EXCEPTIONS. Not for "small fixes". Not for "just a typo".
 
+This rule (and the rest of this file) uses "CEO" as the default human-approver display title — override the printed word via `.claude/project-config.json` → `review_markers.human_approver_title` (default unchanged); the marker filename, structured fields, and gate logic are the same regardless (me2resh/apexyard#957).
+
 ### Plan-level "go" is NOT merge approval
 
 A common failure mode: you present a multi-step plan that includes a merge as one of its steps, the user says "go" or "continue" or "ship it" or "execute the plan", and you execute all the steps *including the merge*. **This is wrong.** Plan-level authorization covers everything in the plan *except* merge steps. Merge steps always require an **explicit per-PR approval that names the PR**.
@@ -103,7 +105,7 @@ A build-class sub-agent (backend-engineer, frontend-engineer, platform-engineer,
 
 Build agents MUST NOT:
 
-- Write any file under `.claude/session/reviews/`, including `*-rex.approved` or `*-ceo.approved`
+- Write any file under `.claude/session/reviews/`, including `*-rex.approved`, `*-ceo.approved`, `*-security.approved`, or `*-architecture.approved` — the first, third, and fourth are mechanically blocked without an active-reviewer marker (see "Mechanical backstop" below); the second remains advisory but is still off-limits
 - Frame their final report as a code review, Rex review, or include a "Verdict: APPROVED / CHANGES REQUESTED" section
 - Claim to be performing an independent review
 
@@ -114,10 +116,12 @@ Build agents MUST:
 
 ### Mechanical backstop
 
-This rule is currently enforced by two layers in addition to the prompt guardrail in each build-agent file:
+As of me2resh/apexyard#843, `warn-review-marker-write.sh` is a **BLOCKING** gate for the three marker roles a build agent can be induced to impersonate — the #728 hardening had made the banner "unmissable" but left the write itself unblocked (the harness gives hooks no reliable per-agent-type signal, so it couldn't distinguish the sanctioned reviewer from an impersonator by identity); #843 gates on session-state provenance instead:
 
-1. `warn-review-marker-write.sh` — PreToolUse advisory (exit 0, never blocks) that fires when a Write or Bash call targets `*-rex.approved` or `*-ceo.approved` under `.claude/session/reviews/`, reminding that markers must come from the real reviewer or `/approve-merge`.
+1. `warn-review-marker-write.sh` — PreToolUse hook that fires when a Write or Bash call targets `*-rex.approved`, `*-security.approved`, or `*-architecture.approved` under `.claude/session/reviews/`. The write is **blocked (exit 2)** unless a matching **active-reviewer session marker** exists at `.claude/session/active-reviewer` (one line: `<owner>/<repo>#<pr>:<kind>`), written by the orchestrator (or one of `/code-review`, `/security-review`, `/design-review`) immediately before spawning the sanctioned reviewer agent. A build-class sub-agent — which never has a reason to see that marker set for its own PR — is blocked with a message telling it to stop and hand back to the orchestrator. The `*-ceo.approved` marker keeps its original **advisory-only** behaviour (unchanged since #728) — it has its own structured-field defence in `block-unreviewed-merge.sh` (`sha=` / `approved_by=user` / `skill_version=`) and is written by a human-invoked skill, not a reviewer agent. A `clear-active-reviewer-marker.sh` SessionStart hook sweeps stale markers left by an interrupted session, mirroring `clear-bootstrap-marker.sh`.
 2. The prompt-convention guardrail in each build-agent file — the primary human-in-the-loop safety net is the per-PR CEO nod required by `/approve-merge`; the orchestrator running a real, separate Rex review is the second. These are the current enforcement layers.
+
+This closes the specific induced-impersonation failure mode from #843: `auto-code-review.sh`'s PostToolUse banner used to tell whoever ran `gh pr create` to "Invoke Rex NOW using the Agent tool" unconditionally. A build-class sub-agent (which cannot nest the Agent tool) could not comply, and twice (PRs #835, #842) resolved the contradiction by writing the `*-rex.approved` marker itself. The banner is now written to address both possible readers explicitly (a shell hook cannot reliably tell orchestrator from sub-agent context — see AgDR-0056), and the marker write it used to induce is now mechanically blocked for a caller with no active-reviewer marker set.
 
 A stronger mechanical gate — requiring a real posted GitHub review at the PR HEAD before the merge gate passes — is analysed in AgDR-0062 and deferred as an explicit **opt-in for future hands-off / multi-account setups**. In a single-maintainer / single-GitHub-account setup (the default), Rex posts reviews from the same account that opened the PR, so an author-independence check can never be satisfied and would block every merge. The gate will be re-enabled behind a config flag if/when merging becomes unattended or a separate reviewer identity (bot account) exists.
 
@@ -143,6 +147,8 @@ Optional audit fields the skill writes but the gate doesn't validate: `approved_
 Both markers' SHAs must match the PR's HEAD as reported by GitHub (`gh pr view <N> --json headRefOid`). New commits after approval invalidate both — you must re-review and re-approve.
 
 **Note on "HEAD":** the merge gates compare marker SHAs against the PR's real HEAD on GitHub, not the local working tree's HEAD. Earlier versions of the hooks used `git rev-parse HEAD`, which forced a `gh pr checkout <N>` dance before every `gh pr merge <N>` (local was rarely the PR branch, and any mismatch blocked the merge). After #55, the hooks resolve the PR HEAD via `gh pr view` and fall back to local HEAD with a visible warning only when the gh call fails (network / auth).
+
+**Note on the load-bearing signal — local marker, not a GitHub "Approved" state (#587):** the merge gate reads the **local `*-rex.approved` marker file**, never GitHub's review-state UI. So the canonical code-reviewer flow is: post the human-readable review with `gh pr review <N> --comment` (verdict stated in the body) AND write the local marker on an APPROVED verdict. The local marker is the required gate output; the GitHub comment is for human visibility. A GitHub "Approved" review state is **optional** and, in the default single-maintainer / single-GitHub-account or auto-mode setup, **unavailable** — GitHub refuses to let an account approve its own PR, and an auto-mode write-classifier may additionally flag a `gh pr review --approve` attempt. That refusal is **expected, not a gate failure**: the sanctioned `code-reviewer` (Rex) sub-agent is a distinct review pass from the author, so writing its own marker satisfies the author-vs-reviewer separation the gate depends on regardless of the GitHub UI. Do not attempt `--approve` by default, and do not treat its block as a failure to review. (This applies ONLY to the sanctioned `code-reviewer` agent — a *build* agent writing a `*-rex.approved` marker is still the author-impersonating-reviewer violation described above.)
 
 Claude can technically `rm` or `touch` these files by hand, or fabricate the structured fields. Doing so is a visible, auditable, grep-able rule violation — and the whole point of recording the rule mechanically is so that the failure mode is "Claude ignored a hook" (visible) instead of "Claude inferred approval from something vague" (invisible). The structured-marker format raises the visibility bar one more notch by requiring the model to type `approved_by=user` etc. on purpose.
 
