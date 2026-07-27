@@ -17,7 +17,6 @@ Reusable GitHub Actions workflows that integrate ApexYard's automated agents int
 | `seo-check.yml` | SEO Check | SEO analysis for content files | Content changes |
 | `auto-tag-on-release-pr-merge.yml` | CI | Auto-tag squash commit + create GitHub Release when a `release/v*` PR merges | PR closed (merged) |
 | `ci.yml` | Combined | All checks in one pipeline | Every PR |
-| `auto-tag-on-release-pr-merge.yml` | Release | Auto-tag squash commit + create GitHub Release when a `release/v*` PR merges to main | PR merge (`release/v*` → main) |
 
 ---
 
