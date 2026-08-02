@@ -167,6 +167,10 @@ CLONE_STATUS="cloned"   # or "preserved" | "declined" | "failed: <reason>"
 
 All subsequent reads in steps 2–6 use `$WORKSPACE_DIR/<name>/` as the repo root whenever `$CLONE_STATUS` is `cloned` or `preserved`. When `$CLONE_STATUS` is `declined` or `failed`, fall back to GitHub API reads via `gh api` / `gh -R <owner/name> …` (degraded but functional).
 
+> **`bin/install-git-hooks.sh` is deliberately NOT invoked here.** An earlier version of this step called it against the freshly-cloned workspace, on the reasoning that it mirrors `/setup`'s call for the ops fork. It does not: `/setup` points `core.hooksPath` at the **ops fork's own** `.githooks/`, which ApexYard controls. Calling the same installer against an arbitrary, just-cloned third-party repo instead points git at *that repo's own* `.githooks/` (whatever it ships), and does so with no provenance check — the installer's only gate is "does a directory of that name exist." Git deliberately never clones `$GIT_DIR/hooks`, which is exactly what makes `git clone` of an untrusted repo a safe, read-only act; repointing `core.hooksPath` at a *tracked* directory removes that property, and a hostile `.githooks/post-checkout` or `.githooks/reference-transaction` then runs as the operator on the very next ordinary git operation — no push required. `/handover`'s whole point is to evaluate a repo before deeper commitment, so this is exactly the wrong moment to hand it code execution. Confirmed by security review on PR #1087 (HIGH-1).
+>
+> The gap this leaves — a managed-project clone's *own* `.githooks/` still isn't wired up by anything, so its terminal `git push` stays unprotected — is real and deliberately deferred, not silently dropped. The correct shape is for the framework to install **its own** hook into the clone's untracked `.git/hooks/` (never point at a tracked third-party directory), which needs its own design and its own ticket. Do not attempt it here.
+
 ### 1.5-reindex. Reindex the cloned repo in MCP (default: always attempt)
 
 After a successful clone (`$CLONE_STATUS=cloned`), trigger an MCP reindex so `search_code` and `search_docs` return results during the deep-dive phases that follow (steps 2–6). Without this step those queries return empty against the just-cloned repo, and the agent silently falls back to `find` + `cat` + `Bash` — defeating the token-cost benefit of cloning early.
@@ -257,6 +261,74 @@ Which harness(es) will drive work on {name}?
 **Don't run the install command yourself** — print it, don't execute `bin/install-*-adapter.sh` against the target repo on the operator's behalf. Adapter install is a decision for the team taking ownership, not a side effect of adoption.
 
 Record the pick as `$SELECTED_HARNESSES` (comma-separated, or `claude-code` if 1/default) for the step 10 summary.
+
+### 1.7. Check server-side branch protection (advisory, default: always attempt)
+
+> Why this exists. AgDR-0115 records the decision that ApexYard does NOT install any client-side push protection into a managed-project clone — doing so would mean pointing `core.hooksPath` at that clone's own tracked `.githooks/`, which is precisely the HIGH-risk wiring #1087's security review removed (see the "1.5-clone" note above and `bin/install-git-hooks.sh`'s header). The accepted consequence: a human running `git push origin main` from a terminal inside this clone is not blocked by anything ApexYard installs — only agent-driven pushes stay covered, via the ops-fork's own `PreToolUse` hooks. For that residual, the managed repo's own **server-side branch protection** is the actual control, not a client-side backstop ApexYard ships. This step only checks whether that control is turned on and nudges the operator if it looks like it isn't — it is advisory, forge-agnostic, and fail-open: a missing check, a network failure, or an unsupported tracker kind never blocks the rest of `/handover`.
+
+Only run this check when the target repo's `<owner/name>` is known (a Git URL was given in step 1). A plain local path with no resolvable remote host has nothing to query: set `BRANCH_PROTECTION_STATUS="skipped (no remote host)"`, print nothing, and continue straight to step 2.
+
+Otherwise, resolve the default branch (prefer the local clone when available; fall back to the API) and the tracker kind, dispatching the protection check the same way `tracker_review_submit` / `tracker_pr_merge` already dispatch on `tracker_kind` (`.claude/hooks/_lib-tracker.sh`) rather than hardcoding one forge's CLI:
+
+```bash
+source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-read-config.sh"
+source "$(git rev-parse --show-toplevel)/.claude/hooks/_lib-tracker.sh"
+
+kind=$(tracker_kind "<owner/name>")
+
+default_branch=""
+if [ "$CLONE_STATUS" = "cloned" ] || [ "$CLONE_STATUS" = "preserved" ]; then
+  default_branch=$(git -C "$WORKSPACE_DIR/<name>" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+fi
+if [ -z "$default_branch" ] && [ "$kind" = "gh" ]; then
+  default_branch=$(gh api "repos/<owner/name>" --jq .default_branch 2>/dev/null)
+fi
+
+BRANCH_PROTECTION_STATUS="skipped (default branch unknown)"
+if [ -n "$default_branch" ]; then
+  case "$kind" in
+    gh)
+      # gh api exits non-zero on BOTH "404 not protected" and a real
+      # failure (auth/network/no-permission/rate-limit). This check does
+      # not need to tell those apart — the response is the same either
+      # way: advise, never block. Fail-open by construction, not by
+      # accident.
+      if gh api "repos/<owner/name>/branches/${default_branch}/protection" >/dev/null 2>&1; then
+        BRANCH_PROTECTION_STATUS="protected"
+      else
+        BRANCH_PROTECTION_STATUS="not protected (or could not be verified)"
+      fi
+      ;;
+    glab)
+      encoded=$(printf '%s' "<owner/name>" | sed 's#/#%2F#')
+      if glab api "projects/${encoded}/protected_branches/${default_branch}" >/dev/null 2>&1; then
+        BRANCH_PROTECTION_STATUS="protected"
+      else
+        BRANCH_PROTECTION_STATUS="not protected (or could not be verified)"
+      fi
+      ;;
+    none|custom|*)
+      # No queryable, generically-shaped REST endpoint for these kinds —
+      # a `custom` tracker's PR/MR host is unknown, and `none` has no host
+      # at all. Say so plainly rather than guessing at an API shape.
+      BRANCH_PROTECTION_STATUS="skipped (no queryable forge for tracker.kind=${kind} — check your forge's branch protection settings manually)"
+      ;;
+  esac
+fi
+```
+
+If `$BRANCH_PROTECTION_STATUS` is `"not protected (or could not be verified)"`, print this nudge once (non-blocking — continue straight to step 2 regardless):
+
+```
+⚠ <name>'s default branch (<default_branch>) has no server-side branch
+protection turned on (or it couldn't be confirmed). ApexYard's own hooks
+only cover agent-driven pushes in this clone — a human running `git push`
+from a terminal here is not blocked. Server-side branch protection on the
+forge is the actual control for that gap (see AgDR-0115). Recommended:
+require a pull request before merging to <default_branch>.
+```
+
+If `$BRANCH_PROTECTION_STATUS` is `"protected"` or either `"skipped"` variant, print nothing further — the step 10 summary line is enough.
 
 ### 2. Read the surface area
 
@@ -1552,6 +1624,7 @@ Registry updated:            apexyard.projects.yaml ({added | skipped})
 Next-step tickets filed:     {N filed of M offered | none offered (zero risks) | declined (skipped all) | skipped (registry not appended)}
 Workspace clone:             workspace/{name}/ ({cloned at step 1.5 | preserved (already existed) | declined (--no-clone) | failed: <reason> | n/a (local path given)})
 Harness:                     {"Claude Code (native)" | "<harness list> — install command(s) printed, see docs/harnesses/<harness>.md" | "other / not sure — no adapter yet"}
+Branch protection:           {"protected" | "not protected (or could not be verified) — nudge printed" | "skipped (default branch unknown)" | "skipped (no queryable forge for tracker.kind=<kind>)" | "skipped (no remote host)"}
 Validation:                  {"completed — verdict <GREEN|YELLOW|RED>" | "skipped" | "not offered (project is active)"}
 
 Tech stack: {one-liner}
@@ -1598,6 +1671,7 @@ Filed follow-up tickets:
 22. **`AGENTS.md` and `handover-assessment.md` don't duplicate — they split by reader** — `handover-assessment.md` (ops fork) is the **operator's** full analysis: risks, harnessability verdict, integration plan, next-step tickets. `AGENTS.md` (in the target repo) is the **agent's** concise operating manual: stable commands, layout, conventions, and the up-front gotchas an agent needs to start working. The volatile risk/integration analysis stays in the assessment; it is not copied into `AGENTS.md`. For low-harnessability repos, `AGENTS.md`'s Gotchas section surfaces what's fragile/missing (no strict types, no lint baseline, no coverage signal) — the in-repo echo of the assessment's LOW warning.
 23. **The "Governed by ApexYard" badge (step 8.6) is opt-in, PR-delivered, idempotent, and never a default** — row 9 of the step 5.6 checklist is **default-OFF** in every mode (checklist default, `--all`, and interactive `all`); it is only generated when explicitly ticked or comma-listed. Every run confirms with the operator by name (`Add a "Governed by ApexYard" badge to <name>'s README?`) before touching the target repo — there is no silent or bulk-implied consent for an externally-visible README edit. The badge is delivered via a branch + PR exactly like `AGENTS.md` (never a direct commit). It is **idempotent**: if either badge variant (`governed_by` or `built_with`) is already present in the README, the step skips and reports `already present` rather than adding a duplicate or swapping variants. The badge markdown itself (URL, color `#2F6DF6`, `flat-square` style) is fixed and quoted verbatim in step 8.6 — don't re-derive it. See AgDR-0090.
 24. **`docs/harnesses/README.md` is the single source of truth for harness support — step 1.6 summarises and links it, never duplicates the matrix.** Read the doc fresh when printing a harness's install command, precondition, or tier rather than trusting a stale table baked into this skill. Never round a harness's tier up — Cursor is failClosed-only, not live-proven, and the skill says so verbatim. Step 1.6 is informational only: it prints the adapter install command but never runs it against the target repo.
+25. **The branch-protection check (step 1.7) is advisory and fail-open, never a gate.** It never blocks the rest of `/handover`, never retries, and never escalates a check failure into anything stronger than the one-line nudge. It exists because AgDR-0115 accepted that ApexYard installs no client-side push protection into a managed-project clone — the nudge is the only signal the operator gets that the *actual* control (the forge's own server-side branch protection) might be off. Dispatch on `tracker_kind` (`.claude/hooks/_lib-tracker.sh`), the same pattern `tracker_review_submit`/`tracker_pr_merge` use — never hardcode one forge's CLI or REST shape. `custom` and `none` tracker kinds get a generic manual-check note, not a guessed API call.
 
 ## When to use this
 

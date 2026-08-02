@@ -88,9 +88,27 @@ _tracker_load_config_lib() {
   fi
   local root hook_dir
   hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
+  # me2resh/apexyard#1062: under a non-bash shell BASH_SOURCE is empty, so the resolution above
+  # degrades to the CALLER's cwd (dirname "" -> "."). Discard a cwd-derived path so the anchored
+  # git-root check below must validate it; a genuine BASH_SOURCE path is where this file lives and
+  # is kept as-is (#1061 only anchored the git-derived fallback, not this cwd-derived branch).
+  if [ -z "${BASH_SOURCE[0]:-}" ]; then hook_dir=""; fi
   if [ -z "$hook_dir" ] || [ ! -f "$hook_dir/_lib-read-config.sh" ]; then
     root=$(git rev-parse --show-toplevel 2>/dev/null)
-    if [ -n "$root" ] && [ -f "$root/.claude/hooks/_lib-read-config.sh" ]; then
+    # me2resh/apexyard#1033: only accept a git-derived root that is actually
+    # an apexyard fork. Without this the fallback sources a trust-chain
+    # library out of ANY repo the cwd happens to be inside -- a
+    # workspace/<project> clone, or an unrelated checkout.
+    #
+    # This narrows an ACCIDENT surface. It is NOT an access-control boundary:
+    # the anchors are unauthenticated presence-only files, and -f follows
+    # symlinks, so anyone able to write to the candidate root can satisfy it.
+    # What it prevents is a cwd-driven misresolution, not a hostile library.
+    # Anchor pair per AgDR-0021 §A/§E -- the same test
+    # resolve_ops_root_walk applies, evaluated against one candidate rather
+    # than a walk. (resolve_ops_root itself is unusable here: three of these
+    # sites are locating _lib-ops-root.sh, and its pin is session-scoped.)
+    if [ -n "$root" ] && { [ -f "$root/.apexyard-fork" ] || { [ -f "$root/onboarding.yaml" ] && [ -f "$root/apexyard.projects.yaml" ]; }; } && [ -f "$root/.claude/hooks/_lib-read-config.sh" ]; then
       hook_dir="$root/.claude/hooks"
     fi
   fi
@@ -121,9 +139,27 @@ _tracker_load_portfolio_lib() {
   fi
   local hook_dir root
   hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
+  # me2resh/apexyard#1062: under a non-bash shell BASH_SOURCE is empty, so the resolution above
+  # degrades to the CALLER's cwd (dirname "" -> "."). Discard a cwd-derived path so the anchored
+  # git-root check below must validate it; a genuine BASH_SOURCE path is where this file lives and
+  # is kept as-is (#1061 only anchored the git-derived fallback, not this cwd-derived branch).
+  if [ -z "${BASH_SOURCE[0]:-}" ]; then hook_dir=""; fi
   if [ -z "$hook_dir" ] || [ ! -f "$hook_dir/_lib-portfolio-paths.sh" ]; then
     root=$(git rev-parse --show-toplevel 2>/dev/null)
-    if [ -n "$root" ] && [ -f "$root/.claude/hooks/_lib-portfolio-paths.sh" ]; then
+    # me2resh/apexyard#1033: only accept a git-derived root that is actually
+    # an apexyard fork. Without this the fallback sources a trust-chain
+    # library out of ANY repo the cwd happens to be inside -- a
+    # workspace/<project> clone, or an unrelated checkout.
+    #
+    # This narrows an ACCIDENT surface. It is NOT an access-control boundary:
+    # the anchors are unauthenticated presence-only files, and -f follows
+    # symlinks, so anyone able to write to the candidate root can satisfy it.
+    # What it prevents is a cwd-driven misresolution, not a hostile library.
+    # Anchor pair per AgDR-0021 §A/§E -- the same test
+    # resolve_ops_root_walk applies, evaluated against one candidate rather
+    # than a walk. (resolve_ops_root itself is unusable here: three of these
+    # sites are locating _lib-ops-root.sh, and its pin is session-scoped.)
+    if [ -n "$root" ] && { [ -f "$root/.apexyard-fork" ] || { [ -f "$root/onboarding.yaml" ] && [ -f "$root/apexyard.projects.yaml" ]; }; } && [ -f "$root/.claude/hooks/_lib-portfolio-paths.sh" ]; then
       hook_dir="$root/.claude/hooks"
     fi
   fi
@@ -136,12 +172,24 @@ _tracker_load_portfolio_lib() {
 
 # ------------------------------------------------------------------------------
 # Internal: _tracker_project_value <owner/repo> <key>
-#   Reads `.projects[] | select(.repo == <owner/repo>) | .tracker.<key>` from the
+#   Reads `.projects[] | select(<repo matches>) | .tracker.<key>` from the
 #   portfolio registry (apexyard.projects.yaml) — the per-project override for
 #   one tracker key (kind / id_pattern / view_command / create_command).
 #
 #   The project is selected by the OPERATION'S TARGET REPO passed in by the
 #   caller — never by cwd or a session-global marker (see AgDR-0072 / #670).
+#
+#   me2resh/apexyard#1123 — a project may declare a PLURAL `repos:` list
+#   instead of (or alongside) the singular `repo:`, for a product split
+#   across several repos governed as one thing. A caller can legitimately
+#   pass the target repo for ANY of that project's repos — not only its
+#   `primary:` — so the selector matches on `repo == <owner/repo>` OR
+#   `<owner/repo>` is a member of `repos[]`. Before this fix, resolving a
+#   non-primary repo silently missed the project's tracker override
+#   entirely and fell back to the global config — the opposite of "tracker
+#   resolution... accepts explicit --repo for the others" (#1123 AC).
+#   Singular-only projects are unaffected: `repos` is simply absent/empty
+#   for them, so the added OR-arm never matches anything extra.
 #
 #   Echoes the value and exits 0 when a non-empty override exists; exits 1
 #   (empty stdout) otherwise — so callers fall back to the global config block.
@@ -166,7 +214,11 @@ _tracker_project_value() {
     # quote, but the python3 path below is argv-safe, so match it here). $key is
     # always a hardcoded literal from callers (kind / id_pattern / view_command),
     # so substituting it into the path is safe.
-    val=$(REPO="$repo" yq eval ".projects[] | select(.repo == strenv(REPO)) | .tracker.$key // \"\"" "$registry" 2>/dev/null | head -1)
+    # `contains([...])`, not `index(...)` — mikefarah yq v4's lexer rejects
+    # `index()` outright ("invalid input text"), which a bare 2>/dev/null
+    # here would otherwise turn into a silent "no override found" rather
+    # than a visible error. Verified against yq v4.53.3.
+    val=$(REPO="$repo" yq eval ".projects[] | select(.repo == strenv(REPO) or ((.repos // []) | contains([strenv(REPO)]))) | .tracker.$key // \"\"" "$registry" 2>/dev/null | head -1)
   fi
   if { [ -z "$val" ] || [ "$val" = "null" ]; } && command -v python3 >/dev/null 2>&1; then
     val=$(python3 - "$registry" "$repo" "$key" <<'PY' 2>/dev/null
@@ -181,7 +233,7 @@ try:
 except Exception:
     sys.exit(0)
 for p in (doc.get("projects") or []):
-    if p.get("repo") == repo:
+    if p.get("repo") == repo or repo in (p.get("repos") or []):
         v = (p.get("tracker") or {}).get(key)
         if v is not None:
             print(v)
@@ -1244,6 +1296,88 @@ tracker_review_submit() {
     custom) _tracker_review_custom "$repo" "$pr" "$verdict" "$body_file" ;;
     *)      _tracker_review_gh     "$repo" "$pr" "$verdict" "$body_file" ;;  # see NOTE above
   esac
+}
+
+# ==============================================================================
+# Public: tracker_review_at_sha <owner/repo> <pr> <sha>
+#
+# Answers "was a review actually POSTED to this PR at this exact commit?" —
+# the server-side counterpart to the local *-rex.approved marker file.
+#
+# WHY THIS EXISTS (me2resh/apexyard#1051). The merge gate's evidence that a code
+# review happened is a local file an agent can write.
+#
+# WHAT THIS IS NOT. AgDR-0062 deferred a STRONGER control — a review at HEAD by
+# an INDEPENDENT reviewer (not the PR author) — as unsatisfiable single-account.
+# That objection stands; this is a deliberately weaker check that drops the
+# independence requirement, which is exactly why it IS satisfiable. It does not
+# provide separation of duties and must not be described as if it did. What it
+# proves is narrow and real: a review exists ON THE FORGE at this commit, which
+# a local file write cannot fabricate. See AgDR-0112.
+#
+# It works because GitHub refuses only self-APPROVAL; a COMMENTED review from
+# the PR's own author is accepted and returned with a commit_id (verified on a
+# live same-account PR). Since #587/AgDR-0075 the canonical reviewer flow
+# already posts exactly that shape, so this costs adopters nothing new.
+#
+# Exit codes are deliberately four-way so the caller can fail closed on
+# "couldn't check" without conflating it with "checked, nothing there":
+#
+#   0 — a review exists at <sha>
+#   1 — query succeeded; NO review at <sha>            → caller should block
+#   2 — query FAILED (network / auth / CLI missing)    → caller should block
+#                                                        (fail-closed, AgDR-0104)
+#   3 — this forge cannot be verified (see below)      → caller should SKIP
+#
+# FORGE SUPPORT is honestly narrow. Only `gh` is implemented. GitLab exposes MR
+# approvals and diff versions rather than SHA-stamped review submissions, and
+# mapping those onto "a review at this commit" correctly needs a live GitLab MR
+# to verify against — building it blind would be the kind of unverified claim
+# this framework has been burned by. glab/custom/none therefore return 3 and the
+# caller skips with a visible warning, rather than bricking those adopters.
+tracker_review_at_sha() {
+  local repo="$1" pr="$2" sha="$3"
+  [ -n "$repo" ] && [ -n "$pr" ] && [ -n "$sha" ] || return 2
+  case "$pr" in ''|*[!0-9]*) return 2 ;; esac
+  # `sha` is interpolated into a jq string literal below. Today's only caller
+  # passes a forge-derived SHA, but this is a public function of a CONTROL
+  # library: a crafted value containing a quote could close the literal and
+  # alter the filter into one that always matches — a fail-OPEN. Validate the
+  # shape here rather than trusting every future caller. (`pr` is already
+  # validated numerically one line up; this closes the same class one argument
+  # over.) 7-40 hex chars covers both abbreviated and full SHAs.
+  case "$sha" in
+    *[!0-9a-fA-F]*) return 2 ;;
+  esac
+  [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 2
+  # `repo` reaches a URL path. This rejects path traversal and whitespace; it
+  # does NOT fully validate owner/name shape (gh itself rejects a malformed
+  # slug, and over-tightening here would break legitimate org names). Stated
+  # precisely so nobody reads it as more than it is.
+  case "$repo" in
+    */../*|*/..|../*|*' '*) return 2 ;;
+  esac
+
+  local kind
+  kind=$(tracker_kind "$repo")
+  case "$kind" in
+    gh) : ;;
+    *)  return 3 ;;   # not verifiable on this forge — see FORGE SUPPORT above
+  esac
+
+  command -v gh >/dev/null 2>&1 || return 2
+
+  local out rc
+  # `.commit_id` is the commit the review was submitted against. Any review
+  # state counts (COMMENTED / APPROVED / CHANGES_REQUESTED) — the verdict lives
+  # in the body per AgDR-0075, and requiring APPROVED specifically is the exact
+  # single-account trap AgDR-0062 hit.
+  out=$(gh api "repos/${repo}/pulls/${pr}/reviews" --paginate \
+          --jq ".[] | select(.commit_id == \"${sha}\") | .id" 2>/dev/null)
+  rc=$?
+  [ "$rc" -ne 0 ] && return 2
+  [ -n "$out" ] && return 0
+  return 1
 }
 
 # ==============================================================================

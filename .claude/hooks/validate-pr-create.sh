@@ -499,10 +499,34 @@ fi
 BODY_CONTENT=""
 # Extract --body-file path. Handles --body-file and the -F short form.
 # After continuation normalization (above) the command is one logical line.
+# me2resh/apexyard#1058 (residual of #1048): "I could not read the body file"
+# and "the body file has no required sections" are DIFFERENT outcomes, and
+# conflating them is what made this hook report sections as missing from a
+# file it had just warned it could not read — sending the author to edit a
+# body that was never the problem. Set when a --body-file was named but its
+# content could not be recovered; consumed at the section check below.
+BODY_FILE_UNREADABLE=0
 BODY_FILE=$(printf '%s' "$COMMAND" | sed -nE 's/.*--body-file[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)
 if [ -z "$BODY_FILE" ]; then
   BODY_FILE=$(printf '%s' "$COMMAND" | sed -nE 's/.*[[:space:]]-F[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)
 fi
+# #1038 — strip ONE matched surrounding quote pair.
+#
+# The `[^[:space:]]+` token grab above is quote-blind, so `--body-file
+# "/p/body.md"` yielded the value WITH its quotes: `"/p/body.md"`. The
+# `-f` test below was then false, BODY_CONTENT stayed empty, and the hook
+# blocked the PR reporting `## Testing` / `## Glossary` as missing when both
+# were present in the file — an error message that points at the PR author
+# rather than at the parser. Quoting a path is correct shell practice, so
+# this fired on ordinary usage.
+#
+# Only a MATCHED pair is stripped: a file literally named `"x.md"` (quotes
+# in the filename) must keep resolving to the same path gh will read, not a
+# different one.
+case "$BODY_FILE" in
+  '"'*'"') BODY_FILE=${BODY_FILE#\"}; BODY_FILE=${BODY_FILE%\"} ;;
+  "'"*"'") BODY_FILE=${BODY_FILE#\'}; BODY_FILE=${BODY_FILE%\'} ;;
+esac
 if [ -n "$BODY_FILE" ]; then
   # Resolve relative paths against the command's cd-target (if any), so
   # 'cd /project && gh pr create --body-file body.md' finds the file at
@@ -513,9 +537,14 @@ if [ -n "$BODY_FILE" ]; then
   fi
   if [ -f "$BODY_FILE" ]; then
     BODY_CONTENT=$(cat "$BODY_FILE")
+    # Readable-but-unslurpable (permissions, race): treat as unreadable rather
+    # than as an empty body, mirroring block-private-refs-in-public-repos.sh.
+    if [ -z "$BODY_CONTENT" ] && [ -s "$BODY_FILE" ]; then
+      BODY_FILE_UNREADABLE=1
+    fi
   else
     echo "WARN: validate-pr-create.sh: --body-file '${BODY_FILE}' not readable from hook context; section check may miss content." >&2
-    # Do not hard-block: we cannot inspect a file we cannot read.
+    BODY_FILE_UNREADABLE=1
   fi
 fi
 
@@ -549,16 +578,43 @@ if echo "$COMMAND" | grep -qE '\-\-body(-file)?\b'; then
     echo "WARN: pr-sections check bypassed by skip marker ($PR_SKIP_MARKER) in PR body." >&2
   else
     # For each required heading, grep for `## <heading>` (case-insensitive).
+    MISSING_SECTIONS=""
     while IFS= read -r section; do
       [ -z "$section" ] && continue
       # Escape regex metachars in the section name so names like "Given / When / Then" work.
       section_re=$(printf '%s' "$section" | sed 's/[][\.^$*+?(){}|]/\\&/g')
       if ! echo "$HAYSTACK" | grep -qiE "^##[[:space:]]+${section_re}\b"; then
-        ERRORS="${ERRORS}PR body missing required '## ${section}' section.\n"
+        MISSING_SECTIONS="${MISSING_SECTIONS}${section}\n"
       fi
     done <<EOF
 ${REQUIRED_SECTIONS}
 EOF
+
+    if [ -n "$MISSING_SECTIONS" ]; then
+      if [ "$BODY_FILE_UNREADABLE" -eq 1 ]; then
+        # me2resh/apexyard#1058: sections appear absent, but the body file was
+        # never read — so their absence is unproven. Report the cause we
+        # actually have evidence for. Still fail closed (a body we cannot
+        # inspect is not a body we can pass), just stop misdirecting the fix.
+        # Name the sections explicitly. An earlier draft said "the sections
+        # above", which referred to nothing — this branch replaces the
+        # per-section list rather than following it, so the author was left
+        # without the one fact they need. On a fix whose whole subject is
+        # message accuracy, a dangling reference is the wrong thing to ship.
+        _unchecked=$(printf '%b' "$MISSING_SECTIONS" | sed '/^$/d' | sed 's/^/## /' | paste -sd, - | sed 's/,/, /g')
+        ERRORS="${ERRORS}PR body file could not be read: ${BODY_FILE}\n"
+        ERRORS="${ERRORS}  The required-section check was NOT run, so these are UNVERIFIED, not missing: ${_unchecked}\n"
+        ERRORS="${ERRORS}  Fix the path (check for a typo, or make it absolute) and retry.\n"
+      else
+        # The body WAS read and the sections genuinely are not in it.
+        while IFS= read -r section; do
+          [ -z "$section" ] && continue
+          ERRORS="${ERRORS}PR body missing required '## ${section}' section.\n"
+        done <<EOF
+$(printf '%b' "$MISSING_SECTIONS")
+EOF
+      fi
+    fi
   fi
 
   # -------------------------------------------------------------------
@@ -701,7 +757,13 @@ fi
 
 if [ -n "$ERRORS" ]; then
   echo "PR VALIDATION BLOCKED:" >&2
-  printf "$ERRORS" >&2
+  # '%b' — NOT `printf "$ERRORS"`. The bare form treats accumulated error text
+  # as a FORMAT STRING, so any '%' inside it is consumed as a conversion spec.
+  # That was latent until #1058 started interpolating a user-supplied path into
+  # a message: `--body-file /tmp/nope%s-100%.md` printed a different path and
+  # silently swallowed the guidance lines that followed. '%b' keeps the '\n'
+  # expansion every existing message relies on while making '%' literal.
+  printf '%b' "$ERRORS" >&2
   echo "" >&2
   echo "Fix the issues above before creating the PR." >&2
   echo "See .claude/rules/git-conventions.md and .claude/rules/pr-quality.md." >&2

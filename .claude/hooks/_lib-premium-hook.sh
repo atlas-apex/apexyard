@@ -154,10 +154,28 @@ _premium_hook_dir() {
     # `:-` default neutralises that; the git-rev-parse fallback is the
     # actual portability fix (works under any shell).
     _PREMIUM_HOOK_DIR_CACHE="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
+    # me2resh/apexyard#1062: under a non-bash shell BASH_SOURCE is empty, so the resolution above
+    # degrades to the CALLER's cwd (dirname "" -> "."). Discard a cwd-derived path so the anchored
+    # git-root check below must validate it; a genuine BASH_SOURCE path is where this file lives and
+    # is kept as-is (#1061 only anchored the git-derived fallback, not this cwd-derived branch).
+    if [ -z "${BASH_SOURCE[0]:-}" ]; then _PREMIUM_HOOK_DIR_CACHE=""; fi
     if [ -z "$_PREMIUM_HOOK_DIR_CACHE" ] || [ ! -f "$_PREMIUM_HOOK_DIR_CACHE/_lib-premium-hook.sh" ]; then
       local _premium_root
       _premium_root="$(git rev-parse --show-toplevel 2>/dev/null)"
-      if [ -n "$_premium_root" ] && [ -f "$_premium_root/.claude/hooks/_lib-premium-hook.sh" ]; then
+      # me2resh/apexyard#1033: only accept a git-derived root that is actually
+      # an apexyard fork. Without this the fallback sources a trust-chain
+      # library out of ANY repo the cwd happens to be inside -- a
+      # workspace/<project> clone, or an unrelated checkout.
+      #
+      # This narrows an ACCIDENT surface. It is NOT an access-control boundary:
+      # the anchors are unauthenticated presence-only files, and -f follows
+      # symlinks, so anyone able to write to the candidate root can satisfy it.
+      # What it prevents is a cwd-driven misresolution, not a hostile library.
+      # Anchor pair per AgDR-0021 §A/§E -- the same test
+      # resolve_ops_root_walk applies, evaluated against one candidate rather
+      # than a walk. (resolve_ops_root itself is unusable here: three of these
+      # sites are locating _lib-ops-root.sh, and its pin is session-scoped.)
+      if [ -n "$_premium_root" ] && { [ -f "$_premium_root/.apexyard-fork" ] || { [ -f "$_premium_root/onboarding.yaml" ] && [ -f "$_premium_root/apexyard.projects.yaml" ]; }; } && [ -f "$_premium_root/.claude/hooks/_lib-premium-hook.sh" ]; then
         _PREMIUM_HOOK_DIR_CACHE="$_premium_root/.claude/hooks"
       fi
     fi

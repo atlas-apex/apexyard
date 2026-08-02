@@ -13,7 +13,19 @@ if [ -z "$COMMAND" ]; then
   exit 0
 fi
 
-# Only check on git push
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Only check on git push. This presence check MUST run against the RAW,
+# unfiltered command — never against heredoc-stripped text. A security
+# review of the first #1066 fix (me2resh/apexyard#1075) found that routing
+# this specific check through stripped text let a malformed heredoc (an
+# unterminated one, a backslash/multi-word/dotted delimiter, two heredocs on
+# one line, or plain prose merely mentioning "<<EOF") make the stripper eat
+# the real push, so the presence check never fired and the branch was never
+# validated at all — a silent bypass, not merely a false positive. See
+# _lib-strip-heredoc.sh's governance comment and
+# docs/agdr/AgDR-0113-heredoc-stripper-additive-only.md for the incident and
+# the additive-(safe)-vs-subtractive-(dangerous) framing that fixes it.
 if ! echo "$COMMAND" | grep -qE '\bgit\s+push\b'; then
   exit 0
 fi
@@ -27,7 +39,13 @@ fi
 # Falls back to local HEAD when the push has no source ref (no-arg push,
 # `git push origin` with no ref, etc.) — preserves today's behaviour for
 # anyone not passing the ref explicitly. See me2resh/apexyard#194, #547.
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+#
+# is_tag_push() and extract_push_ref() are heredoc-aware internally (they
+# strip CONFIRMED heredoc bodies before parsing) — that's fine, because
+# "which ref / is this exempt" is an ADDITIVE question with the fail-closed
+# check below as its own backstop. Passing them the RAW $COMMAND (not a
+# pre-stripped variable) keeps that internal stripping the ONLY place it
+# happens, per _lib-strip-heredoc.sh's governance rule.
 PUSH_REF=""
 if [ -f "$HOOK_DIR/_lib-extract-push-ref.sh" ]; then
   # shellcheck disable=SC1090,SC1091
@@ -38,11 +56,117 @@ if [ -f "$HOOK_DIR/_lib-extract-push-ref.sh" ]; then
   # This guard runs before extract_push_ref so shell redirections appended
   # to a tag-push command (e.g. `git push --tags 2>&1 | tail`) don't cause
   # is_tag_push() to miss the --tags flag. See me2resh/apexyard#547.
+  #
+  # me2resh/apexyard#1081 (the naming-gate's parallel exposure to the bug
+  # #1075 fixed for block-main-push.sh): is_tag_push's TRUE verdict is a
+  # WHOLE-COMMAND signal ("some push somewhere looks tag-shaped"), not
+  # proof the ACTUAL push in this command is a tag push. Trusting it
+  # unconditionally let decoy tag-push evidence sitting in prose a heredoc
+  # `strip_heredoc_bodies` correctly declines to strip (unconfirmed —
+  # backslash/multi-word/dotted delimiter) -- or plain non-heredoc prose --
+  # make this hook `exit 0` before ever validating the REAL, separate,
+  # non-conforming push destination in the same command. Repro:
+  #
+  #   cat > /tmp/m.txt <<END.OF
+  #   we always use git push --tags for releases
+  #   END.OF
+  #   git push origin bogus-branch
+  #
+  # Fix, mirroring the per-occurrence philosophy #1075 landed for
+  # block-main-push.sh's own decoy-ref hijack: before trusting
+  # is_tag_push's exit-0 verdict, walk every RAW push-shaped occurrence
+  # (independent of heredoc parsing -- doesn't care whether any heredoc was
+  # confirmed or declined) and check EACH occurrence individually for its
+  # OWN tag evidence (`--tags`, `tag <name>`, `refs/tags/` within that
+  # segment's own text) versus its own explicit positional ref.
+  #
+  # This must be per-occurrence, not whole-command, for the same reason
+  # `_command_has_untagged_refless_push`'s doc comment gives: a genuine
+  # tag push's own trailing token (e.g. the "v1.2.3" in
+  # `git push upstream tag v1.2.3`) is itself a positional ref by the
+  # naive token walk, so a whole-command "does ANY occurrence have an
+  # explicit ref" check would distrust a perfectly genuine single tag push
+  # too. The correct question per occurrence is: does THIS segment's ref
+  # (if any) come with ITS OWN tag evidence, or is it a bare, evidence-less
+  # occurrence hiding behind is_tag_push's decoy verdict? Only the latter
+  # is unaddressed by anything else in this hook.
+  #
+  # SCAN_LAST_REF takes the LAST such evidence-less, ref-bearing occurrence
+  # (not the first): `extract_push_ref`'s own first-match semantics is
+  # exactly what the decoy exploits -- decoy prose sitting BEFORE the real
+  # command (the "write the heredoc body, then run the real git command"
+  # shape this whole file's shell convention produces) wins the
+  # first-match race, so trusting the first hit here would repeat the same
+  # bug from the other direction. The LAST such occurrence is the one
+  # actually about to execute.
+  #
+  # Only when every occurrence is either evidence-bearing (a genuine tag
+  # push) or carries no explicit ref at all does this hook exit 0 —
+  # nothing for a branch-name validator to check.
+  SCAN_LAST_REF=""
   if is_tag_push "$COMMAND"; then
-    exit 0
+    STRIPPED_FOR_SCAN=$(echo "$COMMAND" | sed 's/[[:space:]][0-9]*[>|].*$//')
+    while IFS= read -r SEGMENT; do
+      [ -z "$SEGMENT" ] && continue
+      HAS_EVIDENCE=0
+      if echo "$SEGMENT" | grep -qE '\s--tags(\s|$)' \
+         || echo "$SEGMENT" | grep -qE '\stag\s+\S' \
+         || echo "$SEGMENT" | grep -qE 'refs/tags/'; then
+        HAS_EVIDENCE=1
+      fi
+      [ "$HAS_EVIDENCE" = "1" ] && continue
+      if declare -F _extract_push_ref_core > /dev/null 2>&1; then
+        SEG_REF=$(_extract_push_ref_core "$SEGMENT")
+        [ -n "$SEG_REF" ] && SCAN_LAST_REF="$SEG_REF"
+      fi
+    done < <(echo "$STRIPPED_FOR_SCAN" | grep -oE '\bgit\s+push\b[^|;&]*')
+
+    if [ -z "$SCAN_LAST_REF" ]; then
+      exit 0
+    fi
   fi
 
-  PUSH_REF=$(extract_push_ref "$COMMAND")
+  if [ -n "$SCAN_LAST_REF" ]; then
+    # An evidence-less, ref-bearing occurrence was found by the
+    # untrusted-tag-signal scan above -- validate it directly rather than
+    # re-deriving via extract_push_ref (whose heredoc-aware first-match
+    # would repeat the same hijack).
+    PUSH_REF="$SCAN_LAST_REF"
+  else
+    PUSH_REF=$(extract_push_ref "$COMMAND")
+  fi
+
+  # Fail closed rather than silently falling back to local HEAD when the
+  # heredoc-aware extraction found nothing BUT a naive, unstripped parse of
+  # the same raw command DID find something ref-shaped. That disagreement
+  # means heredoc-stripping may have hidden the real destination rather than
+  # this being a genuinely ref-less push — and we cannot tell which from
+  # here. Falling back to local HEAD in that case would validate the wrong
+  # thing; blocking and asking the operator to split the call (the ticket's
+  # own mitigation) is the safe direction. See me2resh/apexyard#1075.
+  if [ -z "$PUSH_REF" ]; then
+    RAW_REF=$(_extract_push_ref_core "$COMMAND")
+    if [ -n "$RAW_REF" ]; then
+      cat >&2 <<MSG
+BLOCKED: Cannot safely determine the push destination for this command.
+
+This command contains "git push", and a naive scan (ignoring any heredoc
+structure) found what looks like an explicit destination ref -- but
+heredoc-aware parsing found none, which means a heredoc body in this same
+command may be hiding the real destination rather than this genuinely
+being a ref-less push.
+
+To unblock: run the heredoc-writing step (e.g. writing a commit message
+or PR body to a file) and the "git push" step in SEPARATE Bash calls --
+never inline a heredoc alongside a git command in the same invocation
+(.claude/rules -- see me2resh/apexyard#1066's own mitigation note).
+MSG
+      exit 2
+    fi
+    # else: genuinely no ref anywhere, even ignoring heredoc structure --
+    # a real bare `git push` / `git push origin` relying on upstream
+    # tracking. Fall through to the local-HEAD fallback below, unchanged.
+  fi
 fi
 
 # When the push has no explicit source ref (no-arg `git push`, `git push

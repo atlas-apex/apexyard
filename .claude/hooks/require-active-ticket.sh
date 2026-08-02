@@ -52,55 +52,63 @@
 # let a command that also names an out-of-governance target FIRST slip an
 # in-repo target past a gate that stopped looking after target #1.
 
-# Resolve PATH to its canonical, symlink-free absolute form. Walks up to
-# the nearest EXISTING ancestor, physically resolves it (`pwd -P`, which
-# follows symlinks), then re-appends any not-yet-created tail literally —
-# a tail that doesn't exist yet cannot itself be a symlink. This mirrors
-# `realpath -m` without depending on GNU coreutils (not guaranteed present
-# on macOS/BSD). Echoes the resolved path, or nothing if even "/" can't be
-# stat'd (should not happen for a well-formed absolute path).
+# _resolve_real_path — portable, symlink-safe path canonicalisation.
 #
 # Why this matters (#883): without resolving symlinks first, a symlink
 # living under $HOME that POINTS INTO a governed tree (e.g.
 # ~/link-into-repo → the ops fork) would compare as "outside" the repo
 # under a naive string-prefix check, silently bypassing the gate.
-_resolve_real_path() {
-  local p="$1" dir tail=""
-  [ -n "$p" ] || return 0
-  dir="$p"
-  while [ -n "$dir" ] && [ "$dir" != "/" ] && [ ! -e "$dir" ]; do
-    if [ -z "$tail" ]; then
-      tail="$(basename "$dir")"
-    else
-      tail="$(basename "$dir")/$tail"
+#
+# Sourced from the single shared definition at _lib-path-resolve.sh (PR
+# #1087 review, Rex finding #4) rather than defined inline — this used to
+# be a self-contained copy, which put THREE near-identical
+# implementations of the same algorithm in .claude/hooks/ across two
+# files, one of which had already silently diverged. See
+# _lib-path-resolve.sh's own header comment for the full rationale.
+_RATC_HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$_RATC_HOOK_DIR/_lib-path-resolve.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$_RATC_HOOK_DIR/_lib-path-resolve.sh"
+else
+  # DELIBERATE DEGRADE, not an oversight (#1089 — closing #1087's LOW-2).
+  # _lib-path-resolve.sh is tracked right next to this file, so this branch
+  # only fires on genuine corruption (a partial checkout, a stray deletion) —
+  # it should never happen in a normal clone. Both the code review and the
+  # security review on PR #1087 independently verified that WITHOUT this
+  # else branch (i.e. _resolve_real_path simply undefined), every call site
+  # below still fails toward the SAFE outcome: an undefined-function call
+  # substitutes an empty string, `_og_real_target` stays empty, the
+  # `[ -n "$_og_real_target" ]` guard a few lines down is never satisfied,
+  # and the out-of-governance exemption block is skipped entirely — the
+  # target falls straight through to the ordinary ticket gate below
+  # (GATED, never silently exempted). See #883 for why an unresolved/empty
+  # target must never be treated as exempt.
+  #
+  # This is the deliberate asymmetry with bin/install-git-hooks.sh, which
+  # HARD-FAILS (exit 2) when ITS required lib is missing: that script's
+  # whole job is telling the operator "this clone IS protected," so a false
+  # positive there is actively harmful. This hook is a safety GATE — the
+  # safe direction for a gate that can't resolve a path is to keep gating,
+  # not to wave it through — so a hard failure here would be strictly worse
+  # than the silent degrade this else branch documents and pins.
+  #
+  # What this branch actually changes: nothing about the pass/fail outcome
+  # above (that was already correct) — only the diagnostic. Without a
+  # defined `_resolve_real_path`, bash prints a raw, unhelpful
+  # "command not found" to stderr on every call. Defining a stand-in that
+  # always echoes nothing (the same "unresolvable" contract the real
+  # function's own header comment describes) replaces that with a named,
+  # actionable message — printed once per hook invocation, not once per
+  # call site, so a single Bash command naming several targets doesn't
+  # spam the operator.
+  _resolve_real_path() {
+    if [ -z "${_RATC_PATH_RESOLVE_WARNED:-}" ]; then
+      echo "ApexYard: _lib-path-resolve.sh is missing next to require-active-ticket.sh — path resolution is degrading to fail-closed (gated), not exempt. This should not happen in a normal clone; see me2resh/apexyard#1089." >&2
+      _RATC_PATH_RESOLVE_WARNED=1
     fi
-    dir="$(dirname "$dir")"
-  done
-  if [ ! -e "$dir" ]; then
-    # Nothing on the path exists at all — cannot resolve. Should not
-    # happen for an absolute path since "/" always exists.
     return 0
-  fi
-  if [ -d "$dir" ]; then
-    dir="$(cd "$dir" 2>/dev/null && pwd -P)"
-  else
-    # $dir resolved to an existing FILE (not a directory) partway through
-    # the walk — canonicalize its parent and re-append its own basename.
-    local parent
-    parent="$(cd "$(dirname "$dir")" 2>/dev/null && pwd -P)"
-    if [ -n "$parent" ]; then
-      dir="$parent/$(basename "$dir")"
-    else
-      dir=""
-    fi
-  fi
-  [ -n "$dir" ] || return 0
-  if [ -n "$tail" ]; then
-    printf '%s/%s' "$dir" "$tail"
-  else
-    printf '%s' "$dir"
-  fi
-}
+  }
+fi
 
 # ------------------------------------------------------------------------------
 # _ratc_evaluate_target FILE_PATH TOOL_NAME

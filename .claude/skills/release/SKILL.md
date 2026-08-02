@@ -88,6 +88,8 @@ if [ -z "$LOG_RANGE" ]; then
 fi
 ```
 
+**#1076 — a `Closes` bullet is now emitted ONLY from a recognised, same-repo conventional-commit scope.** `bin/release-changelog.sh` previously (#1056, #1077) resolved an UNSCOPED commit's trailing squash PR number back to the issue it closes via a best-effort `gh pr view --repo <repo>` lookup of the PR's own body. That lookup mechanism (and the `REPO_REMOTE` / `PR_LOOKUP_REPO` env vars that configured it) has been removed entirely: it was itself a source of live wrong closes — a design-doc commit whose subject merely *discussed* several issues could close the wrong one, a cross-repo mention (`other-repo#12`) could be misread as a local issue, and a PR body that merely *mentioned* a closing keyword in prose could resolve to the mentioned number. The governing rule is now "prefer a MISSING close over a WRONG close" (see the script's own header): `fix(#1042): ...` closes `#1042` directly from the scope, with no lookup and no network call; an unscoped commit, a cross-repo scope (`docs(owner/repo#N): ...`), and a revert commit all emit no `Closes` line at all.
+
 The helper emits markdown to stdout in the format:
 
 ```markdown
@@ -109,8 +111,12 @@ Minor release — N features, M fixes.
 - <only if breaking-marker commits exist>
 
 ### Closes
-- Closes #N, #M, ...
+- Closes #N
+- Closes #M
+...
 ```
+
+**#1056 — one bullet per reference, not a comma list.** GitHub's `Closes` keyword only auto-closes the reference *immediately following* it — a single `Closes #N, #M, #P` line only ever closed `#N`; everything after the first was silently inert. The generator now emits one `- Closes #N` bullet per reference so every one of them actually fires. **#1076 narrowed which numbers are eligible in the first place:** a same-repo scoped commit (`fix(#1042): ...`) uses the scope directly (that's the issue, by convention, no lookup needed); everything else — an unscoped commit (`docs: ... (#1045)`), a cross-repo scope (`docs(owner/repo#N): ...`), and a revert commit — emits no `Closes` line at all. A release with fewer `Closes` bullets than before #1076 is expected, not a regression: those refs are now correctly left for a human to close by hand rather than guessed at.
 
 #### Count-mismatch guard (AgDR-0094, option D)
 
@@ -129,9 +135,12 @@ RAW_COUNT=$(git rev-list --count "$LOG_RANGE") || {
   echo "ERROR: 'git rev-list --count $LOG_RANGE' failed — the count-mismatch guard cannot evaluate its precondition. Do NOT proceed; fix \$LOG_RANGE (see /tmp/release-changelog-range.txt) and rerun." >&2
   exit 1
 }
-# Count changelog entry bullets, excluding the trailing "- Closes #N, ..."
-# summary line (#1002: it is a summary, not an entry, and used to be
-# miscounted as one, causing an off-by-one on every run).
+# Count changelog entry bullets, excluding the "- Closes #N" summary bullets
+# (#1002: they are a summary, not an entry, and used to be miscounted as one,
+# causing an off-by-one on every run; #1056 emits one such bullet PER
+# reference instead of a single comma-joined line, so `grep -v` here still
+# needs to exclude ALL of them — `-c` already counts non-matching lines, so
+# no change to this filter itself was needed, only to this comment).
 ENTRY_COUNT=$(printf '%s\n' "$CHANGELOG_DRAFT" | grep -E '^- ' | grep -vcE '^- Closes ' || true)
 [ -n "$ENTRY_COUNT" ] || ENTRY_COUNT=0
 GAP=$(( RAW_COUNT - ENTRY_COUNT ))
@@ -148,7 +157,28 @@ if [ "$GAP" -gt "$TOLERANCE" ]; then
 fi
 ```
 
-**Show the draft** (and the warning, if any) and let the user edit interactively before proceeding. On `--dry-run`, print the draft and stop here with:
+#### Migration script check (soft, #1105)
+
+Immediately after the changelog draft, check whether this release carries a per-adopter migration script. This is the check `docs/upgrading.md` and `.claude/skills/update/SKILL.md` § 8b have documented since AgDR-0032 but that never actually existed here until #1105 — for 21 consecutive releases nothing flagged the omission, which is exactly how `.claude/migrations/` ended up with scripts for only two of the ~30 release hops it should cover. **This check is advisory only — it warns, it does not block the release.** Making it a hard gate is a larger design decision than this fix covers (see Rule 13 below for why it's deliberately left as a follow-up, not shipped here).
+
+```bash
+MIGRATION_SCRIPT=".claude/migrations/${PREV_TAG}-to-vA.B.C.sh"
+if [ ! -f "$MIGRATION_SCRIPT" ]; then
+  echo "⚠️  WARNING: no migration script found at $MIGRATION_SCRIPT."
+  echo "    Every release should ship one — a real migration OR a no-op"
+  echo "    placeholder — so /update's per-release migration chain"
+  echo "    (.claude/migrations/, walked by _lib-migration-chain.sh) stays"
+  echo "    walkable for adopters syncing across this release. See"
+  echo "    .claude/migrations/README.md § 'Authoring a new migration'."
+  echo "    If this release genuinely needs no adopter action, create the"
+  echo "    no-op placeholder now (copy an existing one, e.g."
+  echo "    v5.2.0-to-v5.3.0.sh, as the template) before opening the PR."
+else
+  echo "✓ Migration script present: $MIGRATION_SCRIPT"
+fi
+```
+
+**Show the draft** (and both warnings, if any) and let the user edit interactively before proceeding. On `--dry-run`, print the draft and stop here with:
 
 ```
 Dry run — no changes made. Remove --dry-run to execute.
@@ -215,6 +245,10 @@ gh pr create \
 ## CHANGELOG
 
 <paste the draft from step 3>
+
+## Migration script
+
+- [ ] Does this release need a per-adopter migration? A migration script for this release — `.claude/migrations/${PREV_TAG}-to-vA.B.C.sh` (real migration OR no-op placeholder) — is included in this PR, and `docs/upgrading.md`'s "What each migration does" table has a matching row. See `.claude/migrations/README.md`. (Checked automatically by step 3's soft warning — see #1105.)
 
 ## Testing
 
@@ -368,6 +402,7 @@ This files a `sync/main-to-dev-after-vA.B.C → dev` PR that merges `upstream/ma
 10. **Show the count-mismatch warning if it fires** — a loud gap between `$LOG_RANGE`'s raw commit count and the changelog's entry count means commits inside that range didn't make it into changelog entries (#1017 — not a truncated range; both counts derive from the same `$LOG_RANGE`, so a truncated range can no longer produce this gap). Don't proceed past it without the operator explicitly confirming the range is correct. **Never compare against `upstream/main..upstream/dev`** (#1002) — under the release-cut squash model that range only ever grows, so it always false-positives; `$LOG_RANGE` (captured in step 3) is the range the changelog was actually built from. **A `$LOG_RANGE` that fails to resolve or fails `git rev-list` must halt the release (`exit 1`), never pass silently** (#1017) — see step 3's guard.
 11. **Merge the release PR with an explicit `--subject`/`--body-file`, never a bare `gh pr merge --squash`** (#1004) — this repo's `squash_merge_commit_message=COMMIT_MESSAGES` setting silently drops a trailer that lives only in the PR body. See step 6.
 12. **Verify the `Released-From` trailer landed on the squash commit immediately after merge, and stop before `/release-sync` if it didn't** (#1004) — a missing trailer is invisible until the *next* release cut silently mis-anchors its changelog range. See step 6's verification block and the post-tag checklist in step 7.
+13. **Surface, but don't block on, a missing migration script** (#1105) — step 3's migration-script check and the PR body's "Migration script" checkbox are both **advisory**. This is deliberate, not an oversight: whether a release needs an adopter-facing migration is a judgement call (does this release actually change anything an adopter's fork needs to react to?), and a hard-blocking gate would force every doc-only or internal-tooling release to manufacture a no-op script just to pass CI. Making it a blocking gate (a pre-push hook, or a required PR-create check) is a larger design decision — deliberately left as a follow-up, not bundled into #1105's fix. Until then, the discipline is: read the warning, decide honestly, and don't skip past it out of habit — that's exactly the discipline gap that let 21 consecutive releases ship with no migration script at all.
 
 ## Related
 
