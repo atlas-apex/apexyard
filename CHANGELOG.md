@@ -2,6 +2,130 @@
 
 All notable changes to ApexYard are documented here.
 
+## [v5.4.0] — 2026-08-02
+
+Minor release — 3 features, 25 fixes, 15 improvements.
+
+### Added (feat)
+
+- (#1129) first-class multi-repo project (leak-scrub covers every repo slug) — c7f65d8
+- (#1120) migrate block-main-push onto the shared lib, add --no-verify block, relabel as blocking backstop — 8af2391
+- (#1117) add blocking pre-commit protected-branch gate + fail-closed lib hardening (AgDR-0114) — c9569f4
+
+### Fixed (fix)
+
+- (#1125) centralize trust-chain lib self-location behind one anchored helper — a345010
+- (#1122) dispatch the red-CI check on tracker_kind so glab-registered projects check glab, not gh — 515bf38
+- (#1114) make portfolio path comparison case-insensitive-filesystem aware — ddf82c9
+- (#1113) pin #1087 fail-closed behaviour and correct the installer doc — 098c776
+- (#1112) fail closed on unreadable gh api body-file and unparseable --input — 0b44bac
+- (#1107) stop /dfd discovery from walking into workspace and worktrees — 663ae55
+- (#1111) anchor the pre-push skip marker to a whole line — d57df89
+- (#1110) emit release-changelog Closes only from a recognised conventional-commit scope — 15c6e13
+- (#1109) backfill walkable migration-chain placeholders and add the release-time migration check — 0435c36
+- (#1100) anchor the cwd-derived branch of trust-chain self-location (#1062) — 6d7d3f9
+- (#1101) unlock /decide and /audit-deps, and assert over every locked skill — ac9053b
+- (#1098) block instead of falling back to local HEAD when the forge is unreachable — 1712f79
+- (#1096) lint tracked markdown in the pre-push gate, not the whole disk — 59c3cc6
+- (#1090) enforce protected branches from git's pre-push ref list — 6762610
+- (#1075) strip heredoc bodies before git-command pattern matching — 32a84a3
+- (#1080) make leak-hook target-repo resolution class-based, not positional — d4fa95e
+- (#1082) derive release-changelog's PR lookup repo from the actual remote — acb3a01
+- (#1073) resolve verify-commit-refs.sh's tracker repo from the commit's own directory — 83249c2
+- (#1074) resolve issue refs before making Closes actually auto-close — cd64c00
+- (#1072) stage-then-promote audit_run_persist so a jq failure leaves no file — 8c7e890
+- (#1067) close the leak-hook trim fail-open and correct its bypass advice — 4cfd7a9
+- (#1065) untrack project-config.json and ship a tracked example template — 8822d05
+- (#1061) anchor the git-derived self-location fallback to an apexyard fork — 6699cc3
+- (#1060) stop reporting sections missing from a body file that was not read — 1eef1e0
+- (#1059) treat absolute drive-letter paths as absolute in _portfolio_resolve — cd7f6e6
+
+### Changed (refactor / chore / docs)
+
+- (#1132) ship the v5.3.0→v5.4.0 migration (untrack project-config.json) — d06cc1d
+- (#1130) route remaining hook self-location through resolve_anchored_lib_dir() — ee8aa6c
+- (#1127) memoise session-scoped ops-root + config resolution across hooks — 4cfc58a
+- (#1124) record AgDR-0119 (framework self-audit destination); defer Option A — 6e5510c
+- (#1119) make the Lean tier reachable (accept+document, reduced-scope Rex) [AgDR-0116] — 8aae369
+- (#1118) advisory nudge for trust-chain CONTROL adversarial-test coverage (AgDR-0117) — 1475171
+- (#1116) record AgDR-0115 (accept residual, forge-native check) + fix installer header — cb22bbd
+- (#1115) publish the framework control-plane DFD and threat model — 0d40dc8
+- (#1035) bump the codeql-action group with 3 updates — 7d93615
+- (#1036) bump actions/checkout from 7.0.0 to 7.0.1 — 63dcc4e
+- (#1037) bump ossf/scorecard-action from 2.4.3 to 2.4.4 — 0fef132
+- (#1103) credit aniketshukla1 in the contributors list — 6d5ba88
+- (#1108) pin fail-closed behaviour of the architecture + design merge gates — e2cf6d0
+- (#1106) give isolated-builds worktrees a location, naming, and lifecycle convention — 6d2c6b1
+- (#1087) install git pre-push hooks by default — 0e68a49
+
+### Closes
+
+- Closes #1013
+- Closes #1024
+- Closes #1031
+- Closes #1033
+- Closes #1046
+- Closes #1050
+- Closes #1056
+- Closes #1057
+- Closes #1058
+- Closes #1064
+- Closes #1066
+- Closes #1068
+- Closes #1070
+- Closes #1076
+- Closes #1077
+- Closes #1086
+- Closes #1088
+- Closes #1089
+- Closes #1092
+- Closes #1093
+- Closes #1094
+- Closes #1095
+- Closes #1097
+- Closes #1099
+- Closes #1102
+- Closes #1104
+- Closes #1105
+- Closes #1121
+- Closes #1123
+- Closes #1126
+- Closes #1131
+
+## [v5.3.0] — 2026-07-29
+
+Minor release — 1 feature, 12 fixes, 4 improvements.
+
+### Added (feat)
+
+- (#1051) opt-in merge gate on a review actually posted at HEAD — b41dc12
+
+### Fixed (fix)
+
+- (#1026) the marker-write gate is a backstop — make it advisory — 9130cdb
+- (#1042) put the human gate on approval, not on review — 3b28b93
+- (#1038) PR-create hooks mis-parse a quoted --body-file path — 64e996c
+- (#1039) leak-protection hook fails closed on an unreadable body-file — f625d84
+- (#1029) normalize Windows drive-letter paths in portfolio path canonicalizer — 2554869
+- (#1025) make tracker/onboarding lib self-location zsh-safe, fail loudly — 4c24c2e
+- (#1019) strip trailing CR from config_get so Windows multi-line reads work — ad8daa4
+- (#1030) isolate test_sync_codex_adapter.sh from the ambient session-pin — c9297aa
+- (#1017) count-guard warning text + fail-open range parse (#1017) — b468e76
+- (#1000) narrow warn-review-marker-write.sh to actual write intent — c5ee25c
+- (#1012) release count-mismatch guard + Released-From trailer under squash releases — 3163b37
+- (#1008) set exec bit on reindex-on-session-start.sh — a60d612
+
+### Changed (refactor / chore / docs)
+
+- (#1045) right-size-ceremony cited a premium-only hook as its OSS watchdog — f34e3eb
+- (#1015) AgDR-0109 — marker-write gate is a backstop; activate AgDR-0104 deferred meta-gate — ee56e06
+- (#999) align .claude/hooks AgDR wording with materiality threshold (#999) — 5b60803
+- (#1007) fix stale hook count in CLAUDE.md (47 -> 49) — b8be74b
+
+### Closes
+
+- Closes #999, #1000, #1005, #1007, #1008, #1012, #1015, #1017, #1019, #1025, #1026, #1029, #1030, #1038, #1039, #1042, #1045, #1051
+
 ## [v5.2.0] — 2026-07-24
 
 Minor release — 2 features, 13 fixes, 14 improvements.

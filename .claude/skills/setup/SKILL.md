@@ -71,6 +71,16 @@ The marker is cleared in Step 8 below (and on the next SessionStart by `clear-bo
 
 See AgDR-0011 + me2resh/apexyard#150 for the design rationale.
 
+### Step 0.5: Install the tracked git hooks (REQUIRED)
+
+`core.hooksPath` is a **per-clone** git config value — it lives in `.git/config`, never committed, so every fresh clone of the ops fork starts unset regardless of how many sibling clones already have it configured. Left unset, `.githooks/pre-push` (tracked, but inert without this) never runs on a terminal `git push` — only Claude-Code-driven pushes go through the equivalent `pre-push-gate.sh` PreToolUse hook. Run the installer once per fork, here, so a fresh `/setup` always leaves the clone protected on both paths:
+
+```bash
+bash bin/install-git-hooks.sh
+```
+
+Idempotent — a re-run on an already-configured clone reports "no change" and exits 0. If it exits 1 (a real, different `core.hooksPath` the operator configured on purpose), report that plainly and move on without `--force` — overriding a deliberate adopter choice isn't this step's call to make silently. **If it exits 4, treat this as a hard failure of the step, not a warning**: exit 4 means the `git config core.hooksPath` write did not take effect (a stale `.git/config.lock`, a multi-valued key) and the installer is refusing to report success on an unverified write — this clone is **NOT** protected. Show the operator the installer's own error output verbatim and ask them to retry (`bash bin/install-git-hooks.sh`) before continuing `/setup`; do not silently proceed as if the clone were covered. See `bin/install-git-hooks.sh --help` and me2resh/apexyard#1086 for the full state machine (fresh / idempotent / stale-repair / deliberate-third-party / write-failed).
+
 ### Step 1: Check current state
 
 Read `onboarding.yaml`. Four modes:
@@ -175,7 +185,7 @@ The full setup lives in `docs/multi-project.md` § "Split-portfolio mode — pub
      # touch .apexyard-fork
      ```
 
-   - Stage `.gitignore`, `.claude/project-config.json`, and `.apexyard-fork` for commit. All three are per-fork, not per-machine.
+   - Stage `.gitignore` and `.apexyard-fork` for commit — both are per-fork, not per-machine. **Do NOT stage `.claude/project-config.json`** (me2resh/apexyard#1031): it is gitignored and untracked upstream, so `git add` on it exits 1 and the commit step that follows never runs. It is also the wrong thing to commit — in split-portfolio mode its `portfolio` block names the private sibling repo's path, and the ops fork may be public. Do not reach for `git add -f`; that recreates the exact bug #1031 fixed, where a tracked copy is overwritten by any later `git checkout` and the adopter's private config is lost with no way to restore it.
    - **Legacy fallback (framework-version < #145)**: if the adopter's framework predates the `portfolio:` config block, fall back to creating symlinks pointing at `../<sibling-dir>/apexyard.projects.yaml` and `../<sibling-dir>/projects`. The helper resolves either way. v2 (`onboarding` / `workspace_dir` / `.apexyard-fork`) requires framework ≥ #242 — older forks should run `/update` first to pick up the v2 plumbing before going through this branch.
 7. **Verify**: source `.claude/hooks/_lib-portfolio-paths.sh` and call `portfolio_validate`. Skill MUST refuse to declare success if validate fails — surface the specific failure and ask the operator to fix it before re-running.
 

@@ -664,14 +664,15 @@ write_rex_marker "$sb" 100 "$FIXED_SHA" "org-a/project-a"
 write_ceo_marker_structured "$sb" 100 "$FIXED_SHA" "org-a/project-a"
 run_case_wrapper "wrapper: cross-repo markers do not satisfy the gate (#485 parity)" 2 "no recorded code-reviewer|no CEO approval marker" "$sb" 100 "org-b/project-b"
 
-# --- warn-review-marker-write.sh tests (#494, upgraded to BLOCKING for
-# --- rex/security/architecture in #843) --------------------------------
+# --- warn-review-marker-write.sh tests (#494; BLOCKING in #843, returned
+# --- to ADVISORY in #1026 per AgDR-0111) -------------------------------
 #
 # The hook fires when a Write or Bash command targets a *-rex.approved,
 # *-ceo.approved, *-security.approved, or *-architecture.approved file.
-# *-ceo.approved stays advisory-only (always exit 0, unchanged from #728).
-# The other three now BLOCK (exit 2) unless a matching
-# .claude/session/active-reviewer marker is present. Full case coverage
+# ALL roles are advisory: the hook warns and always exits 0 (#1026,
+# AgDR-0111). A matching .claude/session/active-reviewer marker suppresses
+# the warning for the sanctioned reviewer; it does not unblock anything,
+# because nothing is blocked. Full case coverage
 # (matching marker, kind/pr/repo mismatch, legacy bare filenames, security +
 # architecture roles) lives in the dedicated test_warn_review_marker_write.sh;
 # this file only keeps the original #494 smoke assertions in sync with the
@@ -682,15 +683,17 @@ if [ ! -f "$WARN_HOOK_SRC" ]; then
   echo "FAIL: warn-review-marker-write.sh not found at $WARN_HOOK_SRC" >&2
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}warn-hook-missing "
 else
-  # W1: Write to a rex.approved path, no active-reviewer marker → BLOCKED, exit 2 (#843)
+  # W1: Write to a rex.approved path, no active-reviewer marker → WARNS, exit 0.
+  # Was BLOCKED/exit 2 from #843; returned to advisory in #1026 per AgDR-0111
+  # (the marker hook is a BACKSTOP — this file's own hook is the control).
   input=$(jq -nc --arg fp ".claude/session/reviews/me2resh__apexyard__42-rex.approved" \
     '{tool_name:"Write", tool_input:{file_path:$fp, content:"abc"}}')
   got_stderr=$(echo "$input" | bash "$WARN_HOOK_SRC" 2>&1 >/dev/null)
   got_rc=$?
-  if [ "$got_rc" = "2" ] && echo "$got_stderr" | grep -q "BLOCKED"; then
-    echo "PASS [warn-hook: Write to rex.approved with no active-reviewer marker → BLOCKED, exit 2 (#843)]"; PASS=$((PASS+1))
+  if [ "$got_rc" = "0" ] && echo "$got_stderr" | grep -q "WARNING"; then
+    echo "PASS [warn-hook: Write to rex.approved with no active-reviewer marker → WARNS, exit 0 (#1026)]"; PASS=$((PASS+1))
   else
-    echo "FAIL [warn-hook: Write to rex.approved → BLOCKED, exit 2]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
+    echo "FAIL [warn-hook: Write to rex.approved → WARNS, exit 0]: rc=$got_rc stderr=${got_stderr:0:200}" >&2
     FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}warn-hook-write-rex "
   fi
 
@@ -824,6 +827,74 @@ if [ "$got_rc" = "0" ] && [ -z "$got_stderr" ]; then
 else
   echo "FAIL [#973: jq broken, JSON-escaped-tab NON-merge command -> stays a no-op]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
   FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}jq-broken-tab-nonmerge-noop "
+fi
+
+# --- #1091: forge HEAD unresolvable -> the gate must FAIL CLOSED -------
+#
+# The gate's integrity property is that marker SHAs are compared against the
+# FORGE-reported PR HEAD — state an agent cannot author. Before #1091 the hook
+# fell back to `git rev-parse HEAD` (a local, agent-controlled value) when the
+# gh call failed, with only a warning. That degraded the one adversarially
+# sound boundary into a local read.
+#
+# DISCRIMINATING BY CONSTRUCTION: the local HEAD and the markers are made to
+# AGREE. Under the old fallback the comparison therefore SUCCEEDS and the merge
+# is ALLOWED (rc=0). Under fail-closed it is BLOCKED (rc=2). A test using a
+# mismatching local HEAD would block both before and after, proving nothing.
+
+make_sandbox_gh_fails() {
+  local sb
+  sb=$(make_sandbox)
+  # gh cannot resolve the HEAD: transient network, expired token, rate limit,
+  # and gh-not-installed all surface identically as a failed/empty result.
+  # headRefName + headRepository still answer, so exactly ONE thing fails.
+  cat > "$sb/bin/gh" <<'GHEOF'
+#!/bin/bash
+case "$*" in
+  *"pr view"*"headRefOid"*)     exit 1 ;;
+  *"pr view"*"headRefName"*)    echo "feature/GH-99-test" ;;
+  *"pr view"*"headRepository"*) echo "me2resh/apexyard" ;;
+  *) ;;
+esac
+exit 0
+GHEOF
+  chmod +x "$sb/bin/gh"
+  echo "$sb"
+}
+
+sb=$(make_sandbox_gh_fails)
+# The sandbox's local HEAD — the value the OLD fallback would have used.
+local_head=$(cd "$sb" && git rev-parse HEAD 2>/dev/null)
+# Markers written to MATCH that local HEAD: the setup most favourable to a
+# bypass, where every comparison passes under the old code.
+write_rex_marker "$sb" 99 "$local_head"
+write_ceo_marker_structured "$sb" 99 "$local_head"
+input=$(jq -nc --arg c "gh pr merge 99 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c \
+  "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "2" ] && echo "$got_stderr" | grep -qi "resolve"; then
+  echo "PASS [#1091: forge HEAD unresolvable + markers matching LOCAL head -> BLOCKED]"; PASS=$((PASS+1))
+else
+  echo "FAIL [#1091: forge HEAD unresolvable + markers matching LOCAL head -> BLOCKED]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}1091-fail-closed "
+fi
+
+# Control: gh healthy -> behaviour unchanged, markers at the forge HEAD pass.
+sb=$(make_sandbox)
+write_rex_marker "$sb" 99
+write_ceo_marker_structured "$sb" 99
+input=$(jq -nc --arg c "gh pr merge 99 --repo me2resh/apexyard --squash" '{tool_name:"Bash", tool_input:{command:$c}}')
+got_stderr=$(cd "$sb" && APEXYARD_OPS_DISABLE_PIN=1 PATH="$sb/bin:$PATH" bash -c \
+  "echo '$input' | bash .claude/hooks/block-unreviewed-merge.sh" 2>&1 >/dev/null)
+got_rc=$?
+rm -rf "$sb"
+if [ "$got_rc" = "0" ]; then
+  echo "PASS [#1091 control: gh healthy, markers at forge HEAD -> still ALLOWED]"; PASS=$((PASS+1))
+else
+  echo "FAIL [#1091 control: gh healthy, markers at forge HEAD -> still ALLOWED]: rc=$got_rc stderr=${got_stderr:0:300}" >&2
+  FAIL=$((FAIL+1)); FAILED_CASES="${FAILED_CASES}1091-control-healthy "
 fi
 
 # --- Summary ----------------------------------------------------------

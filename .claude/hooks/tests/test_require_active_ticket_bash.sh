@@ -19,9 +19,10 @@ SRC_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 HOOK_SRC="$SRC_ROOT/.claude/hooks/require-active-ticket.sh"
 LIB_BASH="$SRC_ROOT/.claude/hooks/_lib-detect-bash-write.sh"
 LIB_CFG="$SRC_ROOT/.claude/hooks/_lib-read-config.sh"
+LIB_PATH_RESOLVE="$SRC_ROOT/.claude/hooks/_lib-path-resolve.sh"
 DEFAULTS="$SRC_ROOT/.claude/project-config.defaults.json"
 
-for f in "$HOOK_SRC" "$LIB_BASH" "$LIB_CFG" "$DEFAULTS"; do
+for f in "$HOOK_SRC" "$LIB_BASH" "$LIB_CFG" "$LIB_PATH_RESOLVE" "$DEFAULTS"; do
   if [ ! -f "$f" ]; then
     echo "FAIL: required source missing: $f" >&2
     exit 1
@@ -49,6 +50,36 @@ make_sandbox() {
   cp "$HOOK_SRC" "$sb/.claude/hooks/require-active-ticket.sh"
   cp "$LIB_BASH" "$sb/.claude/hooks/_lib-detect-bash-write.sh"
   cp "$LIB_CFG"  "$sb/.claude/hooks/_lib-read-config.sh"
+  cp "$LIB_PATH_RESOLVE" "$sb/.claude/hooks/_lib-path-resolve.sh"
+  cp "$DEFAULTS" "$sb/.claude/project-config.defaults.json"
+  chmod +x "$sb/.claude/hooks/require-active-ticket.sh"
+  echo "$sb"
+}
+
+# Same as make_sandbox but DELIBERATELY OMITS _lib-path-resolve.sh — used
+# to pin the #1089 fail-closed degraded-mode behaviour (closing #1087's
+# LOW-2): with the lib missing, _resolve_real_path is undefined/stubbed to
+# echo nothing, so any target that would normally be resolved (and possibly
+# exempted) must instead fall through to the ordinary GATED path. See the
+# "#1089 fail-closed" cases below.
+make_sandbox_no_pathresolve() {
+  local sb
+  sb=$(mktemp -d)
+  (
+    cd "$sb" || exit 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "test"
+    : > onboarding.yaml
+    : > apexyard.projects.yaml
+    git add onboarding.yaml apexyard.projects.yaml
+    git commit -q -m "init"
+  )
+  mkdir -p "$sb/.claude/hooks" "$sb/.claude/session"
+  cp "$HOOK_SRC" "$sb/.claude/hooks/require-active-ticket.sh"
+  cp "$LIB_BASH" "$sb/.claude/hooks/_lib-detect-bash-write.sh"
+  cp "$LIB_CFG"  "$sb/.claude/hooks/_lib-read-config.sh"
+  # NOTE: _lib-path-resolve.sh intentionally NOT copied here.
   cp "$DEFAULTS" "$sb/.claude/project-config.defaults.json"
   chmod +x "$sb/.claude/hooks/require-active-ticket.sh"
   echo "$sb"
@@ -404,6 +435,7 @@ mkdir -p "$_t30_ops/.claude/hooks"
 cp "$HOOK_SRC"  "$_t30_ops/.claude/hooks/require-active-ticket.sh"
 cp "$LIB_BASH"  "$_t30_ops/.claude/hooks/_lib-detect-bash-write.sh"
 cp "$LIB_CFG"   "$_t30_ops/.claude/hooks/_lib-read-config.sh"
+cp "$LIB_PATH_RESOLVE" "$_t30_ops/.claude/hooks/_lib-path-resolve.sh"
 cp "$DEFAULTS"  "$_t30_ops/.claude/project-config.defaults.json"
 [ -f "$LIB_OPS_SRC" ]  && cp "$LIB_OPS_SRC"  "$_t30_ops/.claude/hooks/_lib-ops-root.sh"
 [ -f "$LIB_PORT_SRC" ] && cp "$LIB_PORT_SRC" "$_t30_ops/.claude/hooks/_lib-portfolio-paths.sh"
@@ -886,6 +918,56 @@ run_case "#886 sanity: pipe then '2>&1' fd-dup is not gated" 0 "" "$in" "$sb"
 sb=$(make_sandbox)
 in=$(jq -nc --arg c "false || echo err >&2" '{tool_name:"Bash", tool_input:{command:$c}}')
 run_case "#886 sanity: '||' then '>&2' fd-dup is not gated" 0 "" "$in" "$sb"
+
+# --- #1089 fail-closed degraded mode (closing #1087's LOW-2) -----------
+#
+# Mirror of cases 31/35 above (the out-of-governance exemption, #883), but
+# built with make_sandbox_no_pathresolve so _lib-path-resolve.sh is
+# missing. A target that is normally EXEMPT (rc=0, no ticket needed)
+# because it resolves to somewhere outside every governed tree must
+# instead be GATED (rc=2, BLOCKED) when the resolver is unavailable — an
+# unresolvable target must never be treated as exempt (#883). This is the
+# discriminating direction: a hypothetical regression that removed the
+# `[ -n "$_og_real_target" ]` guard around the exemption block (so the
+# block ran even on an empty resolve) would very likely flip this case's
+# result from BLOCKED to EXEMPT, since an empty string trivially fails
+# every "is this path inside X" prefix check the block relies on — proven
+# by hand against a scratch copy with that guard removed while developing
+# this test; the shipped hook (this file, unmodified) keeps the guard and
+# passes.
+
+# 76. Edit tool absolute write to a home-dotfile-style path OUTSIDE any
+#     git repo and OUTSIDE the ops fork, no ticket, LIB MISSING → BLOCKED
+#     (not exempt — contrast with case 31, which is the same scenario
+#     with the lib present and asserts rc=0).
+sb=$(make_sandbox_no_pathresolve)
+home_sim=$(mktemp -d)
+in=$(jq -nc --arg p "$home_sim/.zshrc" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#1089 fail-closed: out-of-repo dotfile GATED when lib missing" 2 "BLOCKED" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 77. Same scenario, WITH an active ticket marker present → the ordinary
+#     ticket-gate path still passes (proves the degrade only removes the
+#     EXEMPTION, not the hook's ability to function once a ticket exists).
+sb=$(make_sandbox_no_pathresolve)
+home_sim=$(mktemp -d)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=1089
+title=test
+url=https://example.com
+EOF
+in=$(jq -nc --arg p "$home_sim/.zshrc" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#1089 fail-closed: same target ALLOWED with an active ticket, lib still missing" 0 "" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 78. Bash write to a plainly in-repo path, no ticket, LIB MISSING →
+#     BLOCKED (regression guard: the missing lib must not accidentally
+#     WIDEN the gate either — ordinary governed writes stay gated exactly
+#     as they would with the lib present).
+sb=$(make_sandbox_no_pathresolve)
+in=$(jq -nc --arg c "echo x > src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#1089 fail-closed: in-repo write still BLOCKED when lib missing" 2 "BLOCKED" "$in" "$sb"
 
 # --- Summary -----------------------------------------------------------
 
