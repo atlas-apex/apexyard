@@ -133,6 +133,11 @@
 
 set -u
 
+# Isolate from live Claude Code session pin/cache (me2resh/apexyard#1549).
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/_test-session-isolation.sh"
+
+
 # Isolation: don't let a live session pin escape this sandbox onto the real
 # ops fork (see bin/run-hook-tests.sh's rationale). No-op when unset/headless.
 export APEXYARD_OPS_DISABLE_PIN=1
@@ -823,6 +828,23 @@ case38() {
 }
 
 # ---------------------------------------------------------------------------
+# (38b) Bash → BSD-form `sed -Ei '' s/aa/bb/ <marker>` -> WARNS, exit 0.
+#       #1414: the library now detects `-i` inside a group of short flags.
+#       This hook's own copy of the sed -i pattern still read only `-i`,
+#       so IS_EXTRACTION_FRAGILE stayed 0. The mis-extracted target
+#       `s/aa/bb/` then looked conclusive, and the hook did not warn.
+# ---------------------------------------------------------------------------
+case38b() {
+  local sb; sb=$(make_sandbox)
+  local marker; marker=$(review_marker_path "$REPO" 42 rex "$sb")
+  printf '%s\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" > "$marker"
+  local cmd="sed -Ei '' s/aa/bb/ ${marker}"
+  run_hook "$sb" "Bash BSD sed -Ei '' mis-extracted target on rex marker -> WARNS (#1414)" \
+    "$(bash_json "$cmd")" 0 "WARNING"
+  rm -rf "$sb"
+}
+
+# ---------------------------------------------------------------------------
 # (39) Bash → GNU-form `sed -i s/aa/bb/ <marker>` on a real rex marker ->
 #      DETECTED -> warns, exit 0. Regression guard: GNU's single-token form returns
 #      EMPTY targets from bash_extract_write_target and already reached the
@@ -1147,6 +1169,7 @@ case35
 case36
 case37
 case38
+case38b
 case39
 case40
 case41
