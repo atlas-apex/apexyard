@@ -139,7 +139,61 @@ assert_eq "hook still allows posix .claude write" 0 \
 assert_eq "hook still blocks posix source write" 2 \
   "$(run_hook "$SB/src/app.ts")"
 
-rm -rf "$SB"
+NONGIT=$(mktemp -d /tmp/apex-nongit.XXXXXX)
+if git -C "$NONGIT" rev-parse --show-toplevel >/dev/null 2>&1; then
+  record_fail "nongit dir is inside a git repo" "$NONGIT"
+fi
+
+run_hook_from() {
+  local dir="$1" path="$2" rc=0
+  local input
+  input=$(jq -nc --arg fp "$path" '{tool_name:"Write", tool_input:{file_path:$fp, content:"x"}}')
+  (
+    cd "$dir" || exit 99
+    env -u CLAUDE_CODE_SESSION_ID APEXYARD_OPS_DISABLE_PIN=1 \
+      bash "$SB/.claude/hooks/require-active-ticket.sh" <<<"$input" >/dev/null 2>&1
+  ) || rc=$?
+  echo "$rc"
+}
+
+assert_eq "nongit cwd blocks windows source" 2 \
+  "$(run_hook_from "$NONGIT" 'C:\Users\x\apexyard\src\app.ts')"
+assert_eq "nongit cwd allows windows .claude" 0 \
+  "$(run_hook_from "$NONGIT" 'C:\Users\x\apexyard\.claude\project-config.json')"
+assert_eq "nongit cwd blocks posix source in a repo" 2 \
+  "$(run_hook_from "$NONGIT" "$SB/src/app.ts")"
+assert_eq "nongit cwd allows a path outside git" 0 \
+  "$(run_hook_from "$NONGIT" "$NONGIT/notes.txt")"
+
+classify_state=$(
+  repo=$(mktemp -d /tmp/apex-cls-repo.XXXXXX)
+  outside=$(mktemp -d /tmp/apex-cls-out.XXXXXX)
+  mkdir -p "$outside/company-hooks"
+  git -C "$repo" init -q
+  git -C "$repo" config core.hooksPath 'C:/outside/company-hooks'
+  # shellcheck disable=SC1091
+  . "$HOOK_DIR/_lib-git-hooks-path.sh"
+  eval "$(declare -f _resolve_real_path | sed '1s/_resolve_real_path/_resolve_real_path_orig/')"
+  _resolve_real_path() {
+    if [ "$1" = "/c/outside/company-hooks" ]; then
+      printf '%s' "$outside/company-hooks"
+      return 0
+    fi
+    _resolve_real_path_orig "$1"
+  }
+  ghp_classify "$repo" .githooks
+  rm -rf "$repo" "$outside"
+)
+case "$classify_state" in
+  third-party:*)
+    record_pass "classify keeps an existing drive-letter hooks dir"
+    ;;
+  *)
+    record_fail "classify keeps an existing drive-letter hooks dir" "$classify_state"
+    ;;
+esac
+
+rm -rf "$SB" "$NONGIT"
 
 echo ""
 echo "PASS: $PASS  FAIL: $FAIL"

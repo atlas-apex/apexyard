@@ -34,22 +34,23 @@ Chosen: **one string transform**.
 
 `ticket_path_is_meta_exempt` runs the transform before it decides that a path is absolute. After that, the existing `.claude/`, `docs/`, and `*.md` rules apply. A path under `.claude/worktrees/` that is not a markdown file stays gated.
 
+`require-active-ticket.sh` runs the same transform before its slash tests. A drive-letter source path stays absolute when the working directory is not the repository. If the Git Bash drive root is not present, that path is not treated as outside governance.
+
+`ghp_classify` maps the repository root and the current hooks path before it tests which path is absolute. An existing directory outside the repository stays third-party. The installer does not replace it without `--force`.
+
 `read_safe` calls `lstat` before `open`. A symlink or a non-regular file raises `ValueError`. `O_NOFOLLOW` and `O_NONBLOCK` are added only when Python defines them. On POSIX, `O_NOFOLLOW` still closes the gap between `lstat` and `open`.
 
 ## Consequences
 
 - A Windows clone can set `core.hooksPath` to `.githooks`.
-- A Write of `.claude/project-config.json` with a Windows path no longer needs an active ticket. A Write of source still does.
+- A Write of `.claude/project-config.json` with a Windows path no longer needs an active ticket. A Write of source still does, including when the working directory is not a git repository.
 - `write-rule-excludes.sh` can update `claudeMdExcludes` on Windows.
 - POSIX containment and POSIX exemptions keep the same results. The transform does not change a path that starts with `/`.
 
 ## Known limits
 
 - On Windows, `O_NOFOLLOW` does not exist. A symlink that appears between `lstat` and `open` can still be followed. POSIX does not have that gap.
-- `ghp_classify` still compares a resolved hooks path with the raw git toplevel.
-  That arm asks whether a hooks directory sits inside the repo under another name.
-  A fresh install does not use that arm.
-  An unset `core.hooksPath` returns before it.
+- `path_is_under_root` does not reject a `..` segment. The installer resolves the directory with `pwd -P` before that check.
 - The transform does not interpret a UNC path.
 
 ## Architecture evolution
@@ -60,11 +61,11 @@ The installer, the ticket exemption helper, and the rule-exclude reader each ass
 
 ### After
 
-Drive-letter paths enter one transform in `_lib-path-resolve.sh` before a containment check or an exemption match. The rule-exclude reader refuses a symlink with `lstat` on every platform, and it uses `O_NOFOLLOW` only where Python provides it. POSIX inputs take the same branches they took before.
+Drive-letter paths enter one transform in `_lib-path-resolve.sh` before a containment check, a ticket-gate slash test, a hooks-path classification, or an exemption match. The rule-exclude reader refuses a symlink with `lstat` on every platform, and it uses `O_NOFOLLOW` only where Python provides it. POSIX inputs take the same branches they took before.
 
 ## Artifacts
 
 - Issues: https://github.com/me2resh/apexyard/issues/1724 https://github.com/me2resh/apexyard/issues/1725 https://github.com/me2resh/apexyard/issues/1737 https://github.com/me2resh/apexyard/issues/1738
 - Related: [AgDR-0219](AgDR-0219-worktree-ticket-gate-exemptions.md), me2resh/apexyard#1018
 - Helper: `.claude/hooks/_lib-path-resolve.sh`
-- Hooks: `.claude/hooks/_lib-ticket-path-exemptions.sh`, `.claude/hooks/lib/rule-excludes.py`, `bin/install-git-hooks.sh`
+- Hooks: `.claude/hooks/_lib-ticket-path-exemptions.sh`, `.claude/hooks/require-active-ticket.sh`, `.claude/hooks/_lib-git-hooks-path.sh`, `.claude/hooks/lib/rule-excludes.py`, `bin/install-git-hooks.sh`
