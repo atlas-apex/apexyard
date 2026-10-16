@@ -1,6 +1,8 @@
 # AgDR-0241: Compare Windows paths in one POSIX form
 
-> For issues #1724, #1725, #1737, and #1738, I chose one string transform for drive-letter paths, and an lstat check before open when Python has no `O_NOFOLLOW`.
+> Issues 1724, 1725, 1737, and 1738 share one fix.
+> Drive-letter paths use one string transform.
+> The reader checks `lstat` when Python has no `O_NOFOLLOW`.
 
 ## Context
 
@@ -12,7 +14,7 @@ Three gates treated those strings as POSIX paths.
 - `ticket_path_is_meta_exempt` only treated a leading `/` as absolute. A `C:\...\.claude\...` path was joined onto the working directory. The `.claude/` and `docs/` exemptions did not match.
 - `rule-excludes.py` opened files with `os.O_NOFOLLOW` and `os.O_NONBLOCK`. Windows Python does not define those names, so the writer crashed.
 
-#1737 and #1725 are the same containment failure. A space in the path is not required.
+Issues 1737 and 1725 are the same containment failure. A space in the path is not required.
 
 ## Options Considered
 
@@ -44,7 +46,10 @@ Chosen: **one string transform**.
 ## Known limits
 
 - On Windows, `O_NOFOLLOW` does not exist. A symlink that appears between `lstat` and `open` can still be followed. POSIX does not have that gap.
-- `ghp_classify` still compares one resolved hooks path with the raw git toplevel when it asks whether an existing hooks directory sits inside the repo under another name. A fresh install does not use that arm. `core.hooksPath` unset returns before it.
+- `ghp_classify` still compares a resolved hooks path with the raw git toplevel.
+  That arm asks whether a hooks directory sits inside the repo under another name.
+  A fresh install does not use that arm.
+  An unset `core.hooksPath` returns before it.
 - The transform does not interpret a UNC path.
 
 ## Architecture evolution
